@@ -71,7 +71,12 @@ impl<T: Numeric> GlobalOperand<T> {
             spec,
             Coords::<u32>::new(),
             Coords::<i32>::new(),
-            ComptimeOption::new_Some(PageTable::new(table, paging, projection)),
+            ComptimeOption::new_Some(PageTable::new(
+                table,
+                paging,
+                projection,
+                tensor.vector_size(),
+            )),
         )
     }
 
@@ -481,10 +486,9 @@ fn check_paging(paging: &Paging, spec: &TileSpec) {
          {:?} moves runs the table does not resolve",
         spec.delivery
     );
-    let (sequence, position) = paging.dims(projection);
-    let innermost = projection.physical_rank() - 1;
+    let (sequence, _) = paging.dims(projection);
     assert!(
-        sequence != innermost && position != innermost,
-        "GlobalOperand: a line runs along the innermost dim, so neither paged axis may be it"
+        sequence != projection.physical_rank() - 1,
+        "GlobalOperand: a line runs along the innermost dim, so it cannot name pages"
     );
 }

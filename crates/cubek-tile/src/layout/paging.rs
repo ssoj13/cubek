@@ -67,17 +67,32 @@ pub(crate) struct PageTable {
     /// The buffer dim a page's positions lie along.
     #[cube(comptime)]
     position_dim: usize,
+    /// Positions one step of the position dim's coordinate covers: a line's width where the
+    /// positions run along the innermost dim, which is addressed in lines; one elsewhere.
+    #[cube(comptime)]
+    unit: usize,
 }
 
 #[cube]
 impl PageTable {
-    /// `table` resolving `paging`'s axes, which `projection` carries.
+    /// `table` resolving `paging`'s axes, which `projection` carries, an operand read `width`
+    /// values a line along its innermost dim.
     pub(crate) fn new(
         table: &Tensor<u32>,
         #[comptime] paging: Paging,
         #[comptime] projection: Projection,
+        #[comptime] width: usize,
     ) -> PageTable {
         let (sequence_dim, position_dim) = comptime!(paging.dims(&projection));
+        let unit = comptime!(match position_dim == projection.physical_rank() - 1 {
+            true => width,
+            false => 1,
+        });
+        comptime!(assert!(
+            paging.page_size.is_multiple_of(unit),
+            "PageTable: a line of {unit} positions would cross a page of {}",
+            paging.page_size
+        ));
         PageTable {
             entries: unsafe { table.as_slice().as_boxed_unchecked() },
             sequence_stride: table.stride(0) as u32,
@@ -86,6 +101,7 @@ impl PageTable {
             page_size: comptime!(paging.page_size),
             sequence_dim,
             position_dim,
+            unit,
         }
     }
 
@@ -96,7 +112,8 @@ impl PageTable {
     /// offset before the mask drops it, and the table holds nothing past its rows to index.
     pub(crate) fn resolve(&self, digits: &Coords<u32>) -> Coords<u32> {
         let page_size = comptime!(self.page_size as u32);
-        let position = digits.at(comptime!(self.position_dim));
+        let unit = comptime!(self.unit as u32);
+        let position = digits.at(comptime!(self.position_dim)).times(unit);
         let logical = position
             .divided_by(page_size)
             .min_with(self.pages_per_sequence.minus(1u32));
@@ -111,7 +128,7 @@ impl PageTable {
             if comptime!(pa == self.sequence_dim) {
                 resolved.push(page);
             } else if comptime!(pa == self.position_dim) {
-                resolved.push(position.remainder(page_size));
+                resolved.push(position.remainder(page_size).divided_by(unit));
             } else {
                 resolved.push(digits.at(pa));
             }
