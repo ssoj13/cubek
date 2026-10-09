@@ -59,6 +59,9 @@ pub(crate) struct PageTable {
     sequence_stride: u32,
     page_stride: u32,
     pages_per_sequence: u32,
+    /// Pages the pool holds: a table entry past them reads the last, since a
+    /// table is device data a launch may never have written.
+    pool_pages: u32,
     #[cube(comptime)]
     page_size: usize,
     /// The buffer dim the pages lie along.
@@ -79,6 +82,7 @@ impl PageTable {
     /// values a line along its innermost dim.
     pub(crate) fn new(
         table: &Tensor<u32>,
+        pool_pages: u32,
         #[comptime] paging: Paging,
         #[comptime] projection: Projection,
         #[comptime] width: usize,
@@ -98,6 +102,7 @@ impl PageTable {
             sequence_stride: table.stride(0) as u32,
             page_stride: table.stride(1) as u32,
             pages_per_sequence: table.shape(1) as u32,
+            pool_pages,
             page_size: comptime!(paging.page_size),
             sequence_dim,
             position_dim,
@@ -121,7 +126,7 @@ impl PageTable {
             .at(comptime!(self.sequence_dim))
             .times(self.sequence_stride)
             .plus(logical.times(self.page_stride));
-        let page = self.entries[at.cast::<usize>()];
+        let page = self.entries[at.cast::<usize>()].min_with(self.pool_pages.minus(1u32));
         let mut resolved = Coords::<u32>::new();
         #[unroll]
         for pa in 0..digits.len() {

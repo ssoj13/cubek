@@ -65,6 +65,10 @@ impl<T: Numeric> GlobalOperand<T> {
             "GlobalOperand::paged: the spec states no paging for the table to resolve"
         )));
         let projection = comptime!(spec.projection.clone());
+        // The pool's pages, off the buffer bound: the operand's shape is the
+        // sequences', its sequence dim's stride the pool's page.
+        let (sequence_dim, _) = comptime!(paging.dims(&projection));
+        let pool_pages = (tensor.buffer_len() * tensor.vector_size()) / tensor.stride(sequence_dim);
         GlobalOperand::<T>::of_tensor::<E>(
             tensor,
             space,
@@ -73,6 +77,7 @@ impl<T: Numeric> GlobalOperand<T> {
             Coords::<i32>::new(),
             ComptimeOption::new_Some(PageTable::new(
                 table,
+                pool_pages as u32,
                 paging,
                 projection,
                 tensor.vector_size(),
