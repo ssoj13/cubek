@@ -65,6 +65,17 @@ pub enum Refusal {
     PagingOfAStatedLayout,
     /// [`paged`](super::Arg::paged) naming an axis no dim of the operand is labelled with.
     PagingOfAnUnlabelledAxis(Axis),
+    /// [`paged`](super::Arg::paged) naming one dim for both the pages and their positions.
+    PagingOfOneDim(Axis),
+    /// [`paged`](super::Arg::paged) on a buffer whose pages, along this axis's dim, are not its
+    /// outermost: the pool's pages are counted off the buffer as its length over theirs.
+    PagesNotOutermost(Axis),
+    /// [`paged`](super::Arg::paged) on positions along the innermost dim, read `width` a line,
+    /// with pages of `page_size` positions: a line would cross a page.
+    PageSplitsALine { page_size: usize, width: usize },
+    /// [`paged`](super::Arg::paged) on a packed operand, or one moved by runs (a bulk copy, a
+    /// tensor map): the table resolves one line at a time.
+    PagingMovedByRuns,
 }
 
 impl Display for Refusal {
@@ -160,6 +171,24 @@ impl Display for Refusal {
             Refusal::PagingOfAnUnlabelledAxis(axis) => write!(
                 f,
                 "Arg::paged: {axis:?} labels no dim of this operand, so no dim holds its pages"
+            ),
+            Refusal::PagingOfOneDim(axis) => write!(
+                f,
+                "Arg::paged: {axis:?} names the pages and their positions both, on one dim"
+            ),
+            Refusal::PagesNotOutermost(axis) => write!(
+                f,
+                "Arg::paged: the pages along {axis:?} must be the buffer's outermost dim, which \
+                 the pool's page count is read off"
+            ),
+            Refusal::PageSplitsALine { page_size, width } => write!(
+                f,
+                "Arg::paged: a line of {width} positions would cross a page of {page_size}"
+            ),
+            Refusal::PagingMovedByRuns => write!(
+                f,
+                "Arg::paged: a page table is resolved a line at a time, so a packed operand or a \
+                 delivery that moves runs has no reading through it"
             ),
         }
     }

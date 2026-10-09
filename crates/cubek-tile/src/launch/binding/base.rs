@@ -180,7 +180,7 @@ impl<'a> Arg<'a, Labelled> {
         let stored = data.binding.as_ref().map(|b| b.tiling).unwrap_or_default();
         let stated = data.projection.is_some() || stored.is_tiled();
         let (geometry, paging) = match data.paged {
-            Some(pool) => pool.read_as_sequences(data.geometry, data.axes, stated)?,
+            Some(pool) => pool.read_as_sequences(&data, stated)?,
             None => (data.geometry, None),
         };
         let data = ArgData { geometry, ..data };
@@ -348,14 +348,30 @@ impl PagedPool {
     /// `geometry`, the pool's, as the sequences the table names: the sequence dim's extent the
     /// table's rows, the position dim's their positions, over the pool's own strides; and the
     /// paging the spec states.
+    ///
+    /// # Errors
+    ///
+    /// What the kernel would refuse as it expands, refused
+    /// here so a candidate that cannot serve is skipped rather than panicking: a stated layout, an
+    /// axis no dim carries, both axes on one dim, pages that are not the outermost dim, a line that
+    /// would cross a page, a packed operand, or a delivery that moves runs the table does not
+    /// resolve.
     fn read_as_sequences(
         self,
-        geometry: Geometry,
-        axes: &[Axis],
+        data: &ArgData<'_>,
         stated: bool,
     ) -> Result<(Geometry, Option<Paging>), Refusal> {
+        let (geometry, axes) = (&data.geometry, data.axes);
         if stated {
             return Err(Refusal::PagingOfAStatedLayout);
+        }
+        if !matches!(data.packing, Packing::Plain)
+            || !matches!(
+                data.delivery,
+                Delivery::SyncPerUnit | Delivery::AsyncPerUnit
+            )
+        {
+            return Err(Refusal::PagingMovedByRuns);
         }
         let leading = geometry.rank().saturating_sub(axes.len());
         let dim = |axis: Axis| {
@@ -365,7 +381,23 @@ impl PagedPool {
                 .ok_or(Refusal::PagingOfAnUnlabelledAxis(axis))
         };
         let (sequence, position) = (dim(self.sequence)?, dim(self.position)?);
+        if sequence == position {
+            return Err(Refusal::PagingOfOneDim(self.sequence));
+        }
+        // The kernel counts the pool's pages as the buffer over the pages' stride, which holds
+        // only where no dim lies outside them.
+        let strides = geometry.strides();
+        if (0..geometry.rank()).any(|d| d != sequence && strides[d] > strides[sequence]) {
+            return Err(Refusal::PagesNotOutermost(self.sequence));
+        }
         let page_size = geometry.shape()[position];
+        let innermost = position + 1 == geometry.rank();
+        if innermost && !page_size.is_multiple_of(data.width) {
+            return Err(Refusal::PageSplitsALine {
+                page_size,
+                width: data.width,
+            });
+        }
         let dims: Vec<_> = geometry
             .dims()
             .enumerate()

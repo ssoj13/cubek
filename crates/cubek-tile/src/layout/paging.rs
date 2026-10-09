@@ -5,7 +5,9 @@
 //! position `s` lies in page `table[b, s / page_size]`, at row `s % page_size`. The projection stays
 //! direct over the logical `[…, sequence, …, position, …]` axes, so every window, walk and bound
 //! is the logical one; the table is resolved only where a coordinate becomes an offset
-//! ([`BufferLayout`](super::projection::BufferLayout)), once per line.
+//! ([`BufferLayout`](super::projection::BufferLayout)), at every offset taken, a masked cell's
+//! included. A table entry past the pool, a position past the table's columns and a sequence past
+//! its rows each read the last there is: a table is device data a launch may never have written.
 
 use cubecl::prelude::*;
 
@@ -58,6 +60,8 @@ pub(crate) struct PageTable {
     entries: Box<[u32]>,
     sequence_stride: u32,
     page_stride: u32,
+    /// The table's rows: a sequence past them reads the last.
+    sequences: u32,
     pages_per_sequence: u32,
     /// Pages the pool holds: a table entry past them reads the last, since a
     /// table is device data a launch may never have written.
@@ -101,6 +105,7 @@ impl PageTable {
             entries: unsafe { table.as_slice().as_boxed_unchecked() },
             sequence_stride: table.stride(0) as u32,
             page_stride: table.stride(1) as u32,
+            sequences: table.shape(0) as u32,
             pages_per_sequence: table.shape(1) as u32,
             pool_pages,
             page_size: comptime!(paging.page_size),
@@ -113,8 +118,9 @@ impl PageTable {
     /// `digits`, a logical coordinate along each buffer dim, with the sequence's digit replaced
     /// by the page its position lies in and the position's by its row there.
     ///
-    /// A position past the sequence's last page reads that page: a masked read may ask for its
-    /// offset before the mask drops it, and the table holds nothing past its rows to index.
+    /// A position past the sequence's last page reads that page, and a sequence past the table's
+    /// last row that row: a masked read asks for its offset before the mask drops it, and the
+    /// table holds nothing past its rows and columns to index.
     pub(crate) fn resolve(&self, digits: &Coords<u32>) -> Coords<u32> {
         let page_size = comptime!(self.page_size as u32);
         let unit = comptime!(self.unit as u32);
@@ -124,6 +130,7 @@ impl PageTable {
             .min_with(self.pages_per_sequence.minus(1u32));
         let at = digits
             .at(comptime!(self.sequence_dim))
+            .min_with(self.sequences.minus(1u32))
             .times(self.sequence_stride)
             .plus(logical.times(self.page_stride));
         let page = self.entries[at.cast::<usize>()].min_with(self.pool_pages.minus(1u32));

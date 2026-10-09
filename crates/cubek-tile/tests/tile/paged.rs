@@ -15,6 +15,7 @@
 use super::{Form, implied};
 use cubecl::{prelude::*, zspace::Shape};
 use cubek_test_utils::{HostData, HostDataType, TestInput};
+use cubek_tile::launch::{Delivery, Refusal};
 use cubek_tile::layout::{PageTableShape, PhysicalAxisMap};
 use cubek_tile::*;
 
@@ -254,6 +255,14 @@ fn pool_values() -> Vec<f32> {
 }
 
 fn run_paged_read(lens: &[u32; SEQUENCES]) -> HostData {
+    run_paged_read_over(lens, &PAGES)
+}
+
+/// [`run_paged_read`] through `pages`.
+fn run_paged_read_over(
+    lens: &[u32; SEQUENCES],
+    pages: &[[u32; PAGES_EACH]; SEQUENCES],
+) -> HostData {
     let client = cubecl::test_device().client();
     let f32_ty = f32::elem_type_native();
     let u32_ty = u32::elem_type_native();
@@ -281,7 +290,7 @@ fn run_paged_read(lens: &[u32; SEQUENCES]) -> HostData {
             .generate_with_f32_host_data();
     let table_handle = TestInput::builder(client.clone(), Shape::new([SEQUENCES, PAGES_EACH]))
         .dtype(u32_ty)
-        .custom(PAGES.iter().flatten().map(|&p| p as f32).collect())
+        .custom(pages.iter().flatten().map(|&p| p as f32).collect())
         .generate_without_host_data();
     let lens_handle = TestInput::builder(client.clone(), Shape::new([SEQUENCES]))
         .dtype(u32_ty)
@@ -328,6 +337,14 @@ fn run_paged_read(lens: &[u32; SEQUENCES]) -> HostData {
 
 /// The reference: each sequence's positions looked up in its row of the table on the host.
 fn expected_paged_read(lens: &[u32; SEQUENCES]) -> Vec<Vec<f32>> {
+    expected_paged_read_over(lens, &PAGES)
+}
+
+/// [`expected_paged_read`] through `pages`, an entry past the pool reading its last page.
+fn expected_paged_read_over(
+    lens: &[u32; SEQUENCES],
+    pages: &[[u32; PAGES_EACH]; SEQUENCES],
+) -> Vec<Vec<f32>> {
     let values = pool_values();
     (0..SEQUENCES)
         .map(|b| {
@@ -335,7 +352,7 @@ fn expected_paged_read(lens: &[u32; SEQUENCES]) -> Vec<Vec<f32>> {
                 .map(|f| {
                     (0..lens[b] as usize)
                         .map(|s| {
-                            let page = PAGES[b][s / PAGE_LEN] as usize;
+                            let page = (pages[b][s / PAGE_LEN] as usize).min(POOL - 1);
                             values[(page * PAGE_LEN + s % PAGE_LEN) * FEATURES_READ + f]
                         })
                         .sum()
@@ -365,4 +382,90 @@ fn a_paged_operand_reads_each_sequence_through_its_table() {
             }
         }
     }
+}
+
+/// A table entry past the pool reads its last page rather than past the buffer: a table is device
+/// data a launch may never have written.
+#[test]
+fn a_paged_read_stays_in_the_pool_and_the_table() {
+    let pages = [[5, 99, 3], [1, 6, 2], [4, u32::MAX, 0]];
+    let lens = [6, 3, 5];
+    let got = run_paged_read_over(&lens, &pages);
+    let want = expected_paged_read_over(&lens, &pages);
+    for (b, row) in want.iter().enumerate() {
+        for (f, cell) in row.iter().enumerate() {
+            assert_eq!(got.get_f32(&[b, f]), *cell, "sequence {b} feature {f}");
+        }
+    }
+}
+
+/// What a kernel could not read through a table is refused as the operand is bound: one dim for
+/// both axes, pages that are not the outermost dim, a line that would cross a page, and a
+/// delivery that moves runs.
+#[test]
+fn a_paged_operand_the_table_cannot_resolve_is_refused_at_build() {
+    let client = cubecl::test_device().client();
+    let launcher = implied(
+        &client,
+        Partitioning::new(
+            Space::new(&[(B, SEQUENCES), (S, PAGES_EACH * 3), (F, 4)]),
+            Levels::leaf(&[(B, 1), (S, READ_BLOCK)])
+                .walk_every(&[S])
+                .walk_every(&[B])
+                .build(),
+        ),
+        Form::Static,
+    );
+    let table = PageTableShape {
+        sequences: SEQUENCES,
+        pages_per_sequence: PAGES_EACH,
+    };
+    let pool = |shape: [usize; 3]| {
+        TestInput::builder(client.clone(), Shape::new(shape))
+            .dtype(f32::elem_type_native())
+            .zeros()
+            .generate_without_host_data()
+    };
+    let [a, b, c, d] = [
+        pool([POOL, 3, 4]),
+        pool([3, POOL, 4]),
+        pool([POOL, 4, 3]),
+        pool([POOL, 3, 4]),
+    ];
+    let one_dim = launcher
+        .arg(a.binding())
+        .axes(&[B, S, F])
+        .paged(S, S, table)
+        .build()
+        .err();
+    assert_eq!(one_dim, Some(Refusal::PagingOfOneDim(S)));
+    let inner_pages = launcher
+        .arg(b.binding())
+        .axes(&[S, B, F])
+        .paged(B, S, table)
+        .build()
+        .err();
+    assert_eq!(inner_pages, Some(Refusal::PagesNotOutermost(B)));
+    let split_line = launcher
+        .arg(c.binding())
+        .axes(&[B, F, S])
+        .vectorize(2)
+        .paged(B, S, table)
+        .build()
+        .err();
+    assert_eq!(
+        split_line,
+        Some(Refusal::PageSplitsALine {
+            page_size: 3,
+            width: 2
+        })
+    );
+    let by_runs = launcher
+        .arg(d.binding())
+        .axes(&[B, S, F])
+        .delivery(Delivery::Tma)
+        .paged(B, S, table)
+        .build()
+        .err();
+    assert_eq!(by_runs, Some(Refusal::PagingMovedByRuns));
 }
