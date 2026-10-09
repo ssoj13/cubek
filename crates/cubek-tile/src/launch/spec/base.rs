@@ -3,7 +3,7 @@
 use cubecl::zspace::SmallVec;
 
 use crate::Delivery;
-use crate::{Axis, Boundary, BoundaryPolicy, Field, Packing, Projection, Space, Storage};
+use crate::{Axis, Boundary, BoundaryPolicy, Field, Packing, Paging, Projection, Space, Storage};
 
 /// The comptime half of an operand: its axis mapping, edge checks, packing, storage and delivery.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -24,6 +24,9 @@ pub struct TileSpec {
     pub stored_tiles: Vec<(Axis, usize)>,
     /// Who moves this operand into a stage ([`delivery`](Self::delivery)).
     pub delivery: Delivery,
+    /// The axes a page table resolves where the buffer is a pool of pages read as sequences
+    /// ([`paged`](Self::paged)); `None` for a buffer read where it lies.
+    pub paging: Option<Paging>,
 }
 
 impl TileSpec {
@@ -37,6 +40,7 @@ impl TileSpec {
             storage: Storage::Strided,
             stored_tiles: Vec::new(),
             delivery: Delivery::SyncPerUnit,
+            paging: None,
         }
     }
 
@@ -101,6 +105,12 @@ impl TileSpec {
              map's or a coordinate tile's"
         );
         self.delivery = delivery;
+        self
+    }
+
+    /// This spec read as the sequences a page table names over a pool of pages ([`Paging`]).
+    pub fn paged(mut self, paging: Paging) -> Self {
+        self.paging = Some(paging);
         self
     }
 

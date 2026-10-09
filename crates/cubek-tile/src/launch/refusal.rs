@@ -60,6 +60,11 @@ pub enum Refusal {
     /// A TMA box lands its rows dense, at most swizzled within one span, and the stage keeps them
     /// as `why` says.
     RowsNoDescriptorLands { why: &'static str },
+    /// [`paged`](super::Arg::paged) on a gathered or storage-tiled operand: a page is resolved
+    /// digit for digit over a plain buffer's labelled dims.
+    PagingOfAStatedLayout,
+    /// [`paged`](super::Arg::paged) naming an axis no dim of the operand is labelled with.
+    PagingOfAnUnlabelledAxis(Axis),
 }
 
 impl Display for Refusal {
@@ -146,6 +151,15 @@ impl Display for Refusal {
                 f,
                 "TMA: a box lands its rows dense, at most swizzled within a span, and the stage \
                  holds {why}"
+            ),
+            Refusal::PagingOfAStatedLayout => write!(
+                f,
+                "Arg::paged: a page is resolved digit for digit over a plain buffer's labelled \
+                 dims, so a gathered mapping or a storage-tiled binding has no reading here"
+            ),
+            Refusal::PagingOfAnUnlabelledAxis(axis) => write!(
+                f,
+                "Arg::paged: {axis:?} labels no dim of this operand, so no dim holds its pages"
             ),
         }
     }

@@ -257,6 +257,7 @@ impl<T: Numeric> Memory<T> {
             physical_strides: strides,
             projection: comptime!(Projection::direct(positional.logical_axes())),
             rows: RowArrangement::InOrder,
+            paging: ComptimeOption::new_None(),
         }
     }
 
@@ -290,6 +291,12 @@ impl<T: Numeric> Memory<T> {
         comptime!(assert!(
             !self.access.overhang.masks(),
             "Memory::window_offset: cmma cannot mask an overhang"
+        ));
+        // A base and a row stride step past a page into whichever page lies next in the pool.
+        comptime!(assert!(
+            self.layout.paging.is_none(),
+            "Memory::window_offset: a pool of pages is read through its table one line at a \
+             time, never as one raw run; stage it"
         ));
         // A base and row stride above a storage tile would silently read another tile's cells.
         match comptime!(self.access.storage) {

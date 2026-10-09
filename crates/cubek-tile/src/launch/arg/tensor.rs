@@ -25,6 +25,27 @@ impl<'a, E: Numeric, V: Size> TileArg<'a, E, V> {
         .tile(comptime!(space.levels().to_vec()))
     }
 
+    /// [`tile`](TileArg::tile), read through `pages` where the operand is a pool of pages bound
+    /// [`paged`](crate::launch::Arg::paged), and where it lies where `pages` is `None`: one
+    /// kernel serves either, the binding deciding which it compiles.
+    pub fn tile_paged(
+        &self,
+        #[comptime] space: Partitioning,
+        pages: ComptimeOption<&Tensor<u32>>,
+    ) -> Tile<E> {
+        #[comptime]
+        match pages {
+            ComptimeOption::Some(table) => GlobalOperand::<E>::paged(
+                self.tensor,
+                table,
+                comptime!(space.space().clone()),
+                comptime!(self.spec.clone()),
+            )
+            .tile(comptime!(space.levels().to_vec())),
+            ComptimeOption::None => self.tile(space),
+        }
+    }
+
     /// [`tile`](TileArg::tile) reading `O` out of the stored `E`, unpacked where the binding is
     /// [`packed`](TileSpec::packed).
     pub fn tile_as<O: Numeric>(&self, partitioning: &Partitioning) -> Tile<O> {

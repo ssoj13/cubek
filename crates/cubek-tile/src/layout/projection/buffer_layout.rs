@@ -19,6 +19,9 @@ pub(crate) struct BufferLayout {
     /// Where a stage keeps each line of a block row.
     #[cube(comptime)]
     pub(crate) rows: RowArrangement,
+    /// The table a pool of pages is read as sequences through ([`Paging`]); `None` for a buffer
+    /// read where it lies.
+    pub(crate) paging: ComptimeOption<PageTable>,
 }
 
 #[cube]
@@ -33,7 +36,7 @@ impl Layout for BufferLayout {
         for pa in 0..rank {
             digits.push(self.physical_digit(&pos, pa));
         }
-        let digits = self.placed(&digits);
+        let digits = self.placed(&self.paged(digits));
         let mut terms = Sequence::<u32>::new();
         #[unroll]
         for pa in 0..rank {
@@ -123,6 +126,15 @@ impl BufferLayout {
             digits.push(line_digit(x, &self.physical_shape, pa));
         }
         digits
+    }
+
+    /// `digits` resolved through the page table where the buffer is a pool of pages.
+    fn paged(&self, digits: Coords<u32>) -> Coords<u32> {
+        #[comptime]
+        match &self.paging {
+            ComptimeOption::Some(table) => table.resolve(&digits),
+            ComptimeOption::None => digits,
+        }
     }
 
     /// `digits` with a swizzled stage's line digit XORed by its row's key.
