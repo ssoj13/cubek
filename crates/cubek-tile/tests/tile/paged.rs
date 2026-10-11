@@ -223,8 +223,8 @@ fn paged_read_sum_kernel<E: Numeric>(
     #[comptime] block: Level,
     #[define(E)] _dtype: ElemType,
 ) {
-    let pool = pool.tile_paged(comptime!(space.clone()), pages);
-    let out = out.tile(comptime!(space.clone()));
+    let pool = pool.tile_paged(&space, pages);
+    let out = out.tile(&space);
 
     for sequence in space.over(&seq) {
         let len = lens[sequence.coord(B)] as usize;

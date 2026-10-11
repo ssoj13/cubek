@@ -30,19 +30,32 @@ impl<'a, E: Numeric, V: Size> TileArg<'a, E, V> {
     /// kernel serves either, the binding deciding which it compiles.
     pub fn tile_paged(
         &self,
-        #[comptime] space: Partitioning,
+        partitioning: &Partitioning,
         pages: ComptimeOption<&Tensor<u32>>,
     ) -> Tile<E> {
+        self.tile_as_paged::<E>(partitioning, pages)
+    }
+
+    /// [`tile_as`](TileArg::tile_as), read through `pages` as [`tile_paged`](TileArg::tile_paged)
+    /// is. A pool of pages is never packed, so `O` is the stored element where `pages` is `Some`.
+    pub fn tile_as_paged<O: Numeric>(
+        &self,
+        partitioning: &Partitioning,
+        pages: ComptimeOption<&Tensor<u32>>,
+    ) -> Tile<O> {
         #[comptime]
         match pages {
-            ComptimeOption::Some(table) => GlobalOperand::<E>::paged(
-                self.tensor,
-                table,
-                comptime!(space.space().clone()),
-                comptime!(self.spec.clone()),
-            )
-            .tile(comptime!(space.levels().to_vec())),
-            ComptimeOption::None => self.tile(space),
+            ComptimeOption::Some(table) => {
+                let space = comptime!(partitioning.clone());
+                GlobalOperand::<O>::paged(
+                    self.tensor,
+                    table,
+                    comptime!(space.space().clone()),
+                    comptime!(self.spec.clone()),
+                )
+                .tile(comptime!(space.levels().to_vec()))
+            }
+            ComptimeOption::None => self.tile_as::<O>(partitioning),
         }
     }
 

@@ -54,13 +54,21 @@ impl<T: Numeric> GlobalOperand<T> {
 
     /// [`tensor`](GlobalOperand::tensor) over a pool of pages, read as the sequences `table` names
     /// ([`Paging`]): the spec states which axes the table resolves, and the tensor's shape is the
-    /// logical one, its sequences and their positions, over the pool's strides.
-    pub fn paged<E: CubePrimitive<Scalar = T>>(
+    /// logical one, its sequences and their positions, over the pool's strides. A pool is never
+    /// packed, so `T` is `E`'s scalar.
+    pub fn paged<E: CubePrimitive>(
         tensor: &Tensor<E>,
         table: &Tensor<u32>,
         #[comptime] space: Space,
         #[comptime] spec: TileSpec,
     ) -> GlobalOperand<T> {
+        let stored = elem_type_of::<E>();
+        let read = elem_type_of::<T>();
+        comptime!(assert!(
+            stored == read,
+            "GlobalOperand::paged: a pool of pages is read at the element it is bound at, \
+             {stored:?}, not {read:?}"
+        ));
         let paging = comptime!(spec.paging.unwrap_or_else(|| panic!(
             "GlobalOperand::paged: the spec states no paging for the table to resolve"
         )));
