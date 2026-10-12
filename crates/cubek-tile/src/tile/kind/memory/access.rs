@@ -632,6 +632,19 @@ impl<T: Numeric> Memory<T> {
         let start = self
             .window_start
             .plus(advances.sum(comptime!((0..rank).collect::<Vec<_>>())));
+        let load = self.vector_tile(&space);
+        // The window's extent along each dim in loads where the level fixes it.
+        let edges = comptime!(
+            (0..rank)
+                .map(|p| {
+                    let axis = space.axis_at(p);
+                    match step.level.extent_in(&space, axis) {
+                        Extent::Dynamic => None,
+                        edge => Some(load.loads_in(axis, edge.get(), space.extent_raw(axis))),
+                    }
+                })
+                .collect::<Vec<_>>()
+        );
 
         self.moved_to(
             Window::new(
@@ -641,6 +654,7 @@ impl<T: Numeric> Memory<T> {
                 comptime!(self.window.signed),
                 comptime!(self.window.boundaries.clone()),
             ),
+            comptime!(Some(edges)),
             start,
             map,
             // No longer covers the buffer, so no straight-through fill.
@@ -736,11 +750,14 @@ impl<T: Numeric> Memory<T> {
         (origin, extent, advances, map)
     }
 
-    /// This store looking at `window` from line `window_start` on; buffer and layout unchanged.
+    /// This store looking at `window` from line `window_start` on; buffer unchanged, and the layout
+    /// pinned at the window where it reads a pool of pages. `edges` is the window's extent along
+    /// each dim in loads where a level fixes it, `None` where the extent is the one before.
     #[allow(clippy::too_many_arguments)]
     fn moved_to(
         &self,
         window: Window,
+        #[comptime] edges: Option<Vec<Option<usize>>>,
         window_start: u32,
         map: RuntimeMap,
         #[comptime] access: Access,
@@ -751,7 +768,7 @@ impl<T: Numeric> Memory<T> {
         Memory::<T> {
             address: comptime!(self.address),
             store: self.store.clone(),
-            layout: self.layout.clone(),
+            layout: self.layout.pinned_at(&window.origin, edges),
             window,
             projection: comptime!(self.projection.clone()),
             source_window: self.source_window.clone(),
@@ -780,6 +797,7 @@ impl<T: Numeric> Memory<T> {
         });
         self.moved_to(
             self.window.clone(),
+            comptime!(None),
             self.window_start,
             self.map.clone(),
             comptime!(Access {
@@ -838,6 +856,7 @@ impl<T: Numeric> Memory<T> {
                     boundaries
                 }),
             ),
+            comptime!(None),
             start,
             self.map.clone(),
             // `until` is a runtime bound, so the window masks from here down.

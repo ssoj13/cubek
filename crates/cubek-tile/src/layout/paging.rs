@@ -10,6 +10,10 @@
 //! table's, read off it at launch, so nothing states them twice. A coordinate past the table reads
 //! the pool's first page without loading from the table, and a table entry past the pool its last:
 //! a table is device data a launch may never have written.
+//!
+//! The table is read as each window is cut, not as each line is: a window pins the page its origin
+//! lies in, and one whose extent is a single sequence and at most a page of positions the next page
+//! too, so its lines pick between the two without touching the table.
 
 use cubecl::prelude::*;
 
@@ -85,6 +89,15 @@ impl Paging {
     }
 }
 
+/// What a window's extent proves of the pages its lines lie in.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Spans {
+    /// Nothing: a line leaving the pinned page reads its own off the table.
+    Any,
+    /// One sequence and at most a page of positions: the pinned page, or the next.
+    TwoPages,
+}
+
 /// A page table as a kernel reads it: `u32`, `[sequences, pages_per_sequence]`, read by stride.
 /// Its shape is the operand's: the sequences it lists and their positions, `page_size` a column.
 #[derive(CubeType, Clone)]
@@ -101,6 +114,17 @@ pub(crate) struct PageTable {
     /// The pool's last page: a table entry past it reads it, since a table is device data a
     /// launch may never have written.
     last_page: u32,
+    /// The page a window's origin lies in, resolved once as the window is cut
+    /// ([`pinned_at`](Self::pinned_at)): a line in the same sequence and the same column of the
+    /// table reads it without loading from the table.
+    pin_sequence: u32,
+    pin_column: u32,
+    pin_page: u32,
+    /// The page of the column after the pin's, where the window [`Spans::TwoPages`].
+    next_page: u32,
+    /// What the window's extent proves of the pages its lines lie in.
+    #[cube(comptime)]
+    spans: Spans,
     #[cube(comptime)]
     pub(crate) page_size: usize,
     /// The buffer dim the pages lie along.
@@ -135,7 +159,7 @@ impl PageTable {
             true => width,
             false => 1,
         });
-        PageTable {
+        let unpinned = PageTable {
             entries: unsafe { table.as_slice().as_boxed_unchecked() },
             sequence_stride: table.stride(0) as u32,
             page_stride: table.stride(1) as u32,
@@ -143,11 +167,87 @@ impl PageTable {
             pages_per_sequence: table.shape(1) as u32,
             // A bound pool holds a page at least; one stated by hand is kept off underflow.
             last_page: pool_pages.max_with(1u32).minus(1u32),
+            pin_sequence: 0u32,
+            pin_column: 0u32,
+            pin_page: 0u32,
+            next_page: 0u32,
+            spans: comptime!(Spans::Any),
             page_size: comptime!(paging.page_size),
             sequence_dim,
             position_dim,
             unit,
+        };
+        unpinned.pinned(0u32, 0u32, comptime!(Spans::Any))
+    }
+
+    /// This table for the window whose origin is `origin` and whose extent along each dim, in
+    /// loads, is `edges` (`None` where the window's extent is the one this table was pinned for).
+    /// Every window is cut through here, so its pages are resolved once: where its extent is one
+    /// sequence and at most a page of positions, its lines lie in the page its origin does or the
+    /// next, both resolved now; elsewhere a line reads the table where it leaves the origin's.
+    pub(crate) fn pinned_at(
+        &self,
+        origin: &Coords<i32>,
+        #[comptime] edges: Option<Vec<Option<usize>>>,
+    ) -> PageTable {
+        let page_size = comptime!(self.page_size as u32);
+        let unit = comptime!(self.unit as u32);
+        let spans = comptime!(match edges {
+            None => self.spans,
+            Some(edges) => {
+                let positions = edges[self.position_dim].map(|loads| loads * self.unit);
+                match (edges[self.sequence_dim], positions) {
+                    (Some(1), Some(positions)) if positions <= self.page_size => Spans::TwoPages,
+                    _ => Spans::Any,
+                }
+            }
+        });
+        let sequence = origin.at(comptime!(self.sequence_dim)).cast::<u32>();
+        let position = origin
+            .at(comptime!(self.position_dim))
+            .cast::<u32>()
+            .times(unit);
+        self.pinned(sequence, position.divided_by(page_size), spans)
+    }
+
+    /// This table pinned at the page column `column` of sequence `sequence` lists.
+    fn pinned(&self, sequence: u32, column: u32, #[comptime] spans: Spans) -> PageTable {
+        let next_page = match comptime!(spans) {
+            Spans::TwoPages => self.lookup(sequence, column.plus(1u32)),
+            Spans::Any => 0u32,
+        };
+        PageTable {
+            entries: self.entries.clone(),
+            sequence_stride: self.sequence_stride,
+            page_stride: self.page_stride,
+            sequences: self.sequences,
+            pages_per_sequence: self.pages_per_sequence,
+            last_page: self.last_page,
+            pin_sequence: sequence,
+            pin_column: column,
+            pin_page: self.lookup(sequence, column),
+            next_page,
+            spans,
+            page_size: comptime!(self.page_size),
+            sequence_dim: comptime!(self.sequence_dim),
+            position_dim: comptime!(self.position_dim),
+            unit: comptime!(self.unit),
         }
+    }
+
+    /// The page column `column` of sequence `sequence` lists, clamped to the pool.
+    ///
+    /// A coordinate outside the table, which only a masked read asks for before the mask drops
+    /// it, reads the pool's first page and never loads past the table: the table may be empty.
+    fn lookup(&self, sequence: u32, column: u32) -> u32 {
+        let mut page = 0u32;
+        if sequence < self.sequences && column < self.pages_per_sequence {
+            let at = sequence
+                .times(self.sequence_stride)
+                .plus(column.times(self.page_stride));
+            page = self.entries[at.cast::<usize>()].min_with(self.last_page);
+        }
+        page
     }
 
     /// `pool`, the geometry of the pool as it lies, as the sequences this table lists: the table's
@@ -171,23 +271,24 @@ impl PageTable {
     }
 
     /// `digits`, a logical coordinate along each buffer dim, with the sequence's digit replaced
-    /// by the page its position lies in and the position's by its row there.
-    ///
-    /// A coordinate outside the table, which only a masked read asks for before the mask drops
-    /// it, reads the pool's first page and never loads past the table: the table may be empty.
+    /// by the page its position lies in and the position's by its row there: the pinned page
+    /// where the line lies in it, else the table's [`lookup`](Self::lookup).
     pub(crate) fn resolve(&self, digits: &Coords<u32>) -> Coords<u32> {
         let page_size = comptime!(self.page_size as u32);
         let unit = comptime!(self.unit as u32);
         let sequence = digits.at(comptime!(self.sequence_dim));
         let position = digits.at(comptime!(self.position_dim)).times(unit);
-        let logical = position.divided_by(page_size);
-        let mut page = 0u32;
-        if sequence < self.sequences && logical < self.pages_per_sequence {
-            let at = sequence
-                .times(self.sequence_stride)
-                .plus(logical.times(self.page_stride));
-            page = self.entries[at.cast::<usize>()].min_with(self.last_page);
-        }
+        let column = position.divided_by(page_size);
+        let page = match comptime!(self.spans) {
+            Spans::TwoPages => select(column == self.pin_column, self.pin_page, self.next_page),
+            Spans::Any => {
+                let mut page = self.pin_page;
+                if sequence != self.pin_sequence || column != self.pin_column {
+                    page = self.lookup(sequence, column);
+                }
+                page
+            }
+        };
         let mut resolved = Coords::<u32>::new();
         #[unroll]
         for pa in 0..digits.len() {

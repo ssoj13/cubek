@@ -128,6 +128,27 @@ impl BufferLayout {
         digits
     }
 
+    /// This layout for a window whose origin is `origin` and whose extent along each dim is
+    /// `edges` ([`PageTable::pinned_at`]): the pages the window reads resolved once where the
+    /// buffer is a pool of pages, unchanged elsewhere.
+    pub(crate) fn pinned_at(
+        &self,
+        origin: &Coords<i32>,
+        #[comptime] edges: Option<Vec<Option<usize>>>,
+    ) -> BufferLayout {
+        #[comptime]
+        match &self.paging {
+            ComptimeOption::Some(table) => BufferLayout {
+                physical_shape: self.physical_shape.clone(),
+                physical_strides: self.physical_strides.clone(),
+                projection: comptime!(self.projection.clone()),
+                rows: comptime!(self.rows),
+                paging: ComptimeOption::new_Some(table.pinned_at(origin, edges)),
+            },
+            ComptimeOption::None => self.clone(),
+        }
+    }
+
     /// `digits` resolved through the page table where the buffer is a pool of pages.
     fn paged(&self, digits: Coords<u32>) -> Coords<u32> {
         #[comptime]

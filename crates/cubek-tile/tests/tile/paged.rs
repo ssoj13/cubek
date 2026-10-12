@@ -209,18 +209,20 @@ const READ_BLOCK: usize = 4;
 /// held by two sequences.
 const PAGES: [[u32; PAGES_EACH]; SEQUENCES] = [[5, 0, 3], [1, 6, 2], [4, 4, 0]];
 
-/// `out[b] = Σ pool[b's page of s, s % PAGE_LEN]` over the first `lens[b]` positions of sequence `b`,
-/// read through [`TileArg::tile_paged`]: the kernel walks logical positions, a block of them a
-/// step, and [`Tile::within`] cuts each sequence at its own length.
+/// `out[b] = Σ pool[b's page of s, s % PAGE_LEN]` over positions `from..lens[b]` of sequence `b`,
+/// read through [`TileArg::tile_paged`]: the kernel walks logical positions, `read_block` of them
+/// a step, and [`Tile::within`] cuts each sequence at its own length.
 #[cube(launch)]
 fn paged_read_sum_kernel<E: Numeric>(
     pool: &TileArg<'_, E, Const<1>>,
     pages: ComptimeOption<&Tensor<u32>>,
     lens: &Tensor<u32>,
     out: &TileArg<'_, E, Const<1>>,
+    from: u32,
     space: Partitioning,
     #[comptime] seq: Level,
     #[comptime] block: Level,
+    #[comptime] read_block: usize,
     #[define(E)] _dtype: ElemType,
 ) {
     let pool = pool.tile_paged(&space, pages);
@@ -232,8 +234,12 @@ fn paged_read_sum_kernel<E: Numeric>(
         let mut total = out.at(&sequence);
         total.init(Monoid::identity::<E>(comptime!(Monoid::Sum)));
 
-        let positions = pool.within(S, 0, len);
-        for blk in sequence.over(&block).range(0, len.div_ceil(READ_BLOCK)) {
+        let from = from as usize;
+        let positions = pool.within(S, from, len);
+        for blk in sequence
+            .over(&block)
+            .range(0, len.saturating_sub(from).div_ceil(read_block))
+        {
             let mut cell = out.at(&blk);
             cell.reduce_axis_accumulate(&positions.at(&blk), comptime!(Monoid::Sum));
         }
@@ -258,6 +264,11 @@ fn run_paged_read(lens: &[u32; SEQUENCES]) -> HostData {
     run_paged_read_over(lens, &rows(&PAGES))
 }
 
+/// A read through [`PAGES`] `block` positions a step from position `from` on.
+fn run_paged_read_from(lens: &[u32; SEQUENCES], block: usize, from: u32) -> HostData {
+    run_paged_read_blocks(lens, &rows(&PAGES), block, from)
+}
+
 /// `pages` as a table of rows, any number of them and of any width.
 fn rows(pages: &[[u32; PAGES_EACH]]) -> Vec<Vec<u32>> {
     pages.iter().map(|row| row.to_vec()).collect()
@@ -266,6 +277,16 @@ fn rows(pages: &[[u32; PAGES_EACH]]) -> Vec<Vec<u32>> {
 /// [`run_paged_read`] through `pages`, whose rows and columns need not be the launch's: the table
 /// sets the operand's extent, and the launch walks its own.
 fn run_paged_read_over(lens: &[u32; SEQUENCES], pages: &[Vec<u32>]) -> HostData {
+    run_paged_read_blocks(lens, pages, READ_BLOCK, 0)
+}
+
+/// [`run_paged_read_over`] `block` positions a step from position `from` on.
+fn run_paged_read_blocks(
+    lens: &[u32; SEQUENCES],
+    pages: &[Vec<u32>],
+    block: usize,
+    from: u32,
+) -> HostData {
     let client = cubecl::test_device().client();
     let f32_ty = f32::elem_type_native();
     let u32_ty = u32::elem_type_native();
@@ -278,7 +299,7 @@ fn run_paged_read_over(lens: &[u32; SEQUENCES], pages: &[Vec<u32>]) -> HostData 
                 (S, PAGES_EACH * PAGE_LEN),
                 (F, FEATURES_READ),
             ]),
-            Levels::leaf(&[(B, 1), (S, READ_BLOCK)])
+            Levels::leaf(&[(B, 1), (S, block)])
                 .walk_every(&[S])
                 .walk_every(&[B])
                 .build(),
@@ -323,9 +344,11 @@ fn run_paged_read_over(lens: &[u32; SEQUENCES], pages: &[Vec<u32>]) -> HostData 
             out_handle.clone().binding().into_tensor_arg(),
             TileSpec::direct(&[B, F]),
         ),
+        from,
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
         launcher.partitioning().level(1),
+        block,
         f32_ty,
     );
 
@@ -340,12 +363,21 @@ fn expected_paged_read(lens: &[u32; SEQUENCES]) -> Vec<Vec<f32>> {
 /// [`expected_paged_read`] through `pages`, an entry past the pool reading its last page and a
 /// position past the table reading zero.
 fn expected_paged_read_over(lens: &[u32; SEQUENCES], pages: &[Vec<u32>]) -> Vec<Vec<f32>> {
+    expected_paged_read_from(lens, pages, 0)
+}
+
+/// [`expected_paged_read_over`] from position `from` on.
+fn expected_paged_read_from(
+    lens: &[u32; SEQUENCES],
+    pages: &[Vec<u32>],
+    from: u32,
+) -> Vec<Vec<f32>> {
     let values = pool_values();
     (0..SEQUENCES)
         .map(|b| {
             (0..FEATURES_READ)
                 .map(|f| {
-                    (0..lens[b] as usize)
+                    (from as usize..lens[b] as usize)
                         .map(|s| {
                             let page = pages.get(b).and_then(|row| row.get(s / PAGE_LEN));
                             page.map_or(0.0, |&page| {
@@ -397,9 +429,30 @@ fn a_paged_read_stays_in_the_pool_and_the_table() {
     }
 }
 
+/// Steps of a page or less resolve both pages a window can touch as it is cut: aligned to the
+/// pages, inside one, and straddling two from an odd start.
+#[test]
+fn a_paged_read_of_steps_within_a_page_reads_each_sequence_through_its_table() {
+    let lens = [6, 5, 3];
+    for (block, from) in [(1, 0), (2, 0), (2, 1), (1, 3)] {
+        let got = run_paged_read_from(&lens, block, from);
+        let want = expected_paged_read_from(&lens, &rows(&PAGES), from);
+        for (b, row) in want.iter().enumerate() {
+            for (f, cell) in row.iter().enumerate() {
+                assert_eq!(
+                    got.get_f32(&[b, f]),
+                    *cell,
+                    "{block} a step from {from}: sequence {b} feature {f}"
+                );
+            }
+        }
+    }
+}
+
 /// The table sets the operand's extent, not the launch: a table of fewer rows or narrower rows
-/// than the launch walks reads zero past them, and an empty one reads zero throughout, never past
-/// the table to find out.
+/// than the launch walks reads zero past them, and an empty one reads zero throughout. That no
+/// load lands past the table is the guard in `PageTable::resolve`'s doing, which values cannot
+/// show: the mask drops whatever such a load returns.
 #[test]
 fn a_paged_read_past_the_table_reads_zero() {
     let lens = [6, 5, 4];
