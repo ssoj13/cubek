@@ -25,7 +25,7 @@ pub struct TileSpec {
     /// Who moves this operand into a stage ([`delivery`](Self::delivery)).
     pub delivery: Delivery,
     /// The axes a page table resolves where the buffer is a pool of pages read as sequences
-    /// ([`paged`](Self::paged)); `None` for a buffer read where it lies.
+    /// ([`Arg::paged`](crate::launch::Arg::paged)); `None` for a buffer read where it lies.
     pub paging: Option<Paging>,
 }
 
@@ -105,12 +105,6 @@ impl TileSpec {
              map's or a coordinate tile's"
         );
         self.delivery = delivery;
-        self
-    }
-
-    /// This spec read as the sequences a page table names over a pool of pages ([`Paging`]).
-    pub fn paged(mut self, paging: Paging) -> Self {
-        self.paging = Some(paging);
         self
     }
 
