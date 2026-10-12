@@ -67,9 +67,12 @@ pub enum Refusal {
     PagingOfAnUnlabelledAxis(Axis),
     /// [`paged`](super::Arg::paged) naming one dim for both the pages and their positions.
     PagingOfOneDim(Axis),
-    /// [`paged`](super::Arg::paged) on a buffer whose pages, along this axis's dim, are not its
-    /// outermost: the pool's pages are counted off the buffer as its length over theirs.
-    PagesNotOutermost(Axis),
+    /// [`paged`](super::Arg::paged) with the pages along the innermost dim, this axis's: a line
+    /// runs along it, so one line would span pages.
+    PagesAlongALine(Axis),
+    /// [`paged`](super::Arg::paged) on a pool of no pages, or of pages of no positions: there is
+    /// no page for a table entry to read.
+    PagingOfAnEmptyPool,
     /// [`paged`](super::Arg::paged) on positions along the innermost dim, read `width` a line,
     /// with pages of `page_size` positions: a line would cross a page.
     PageSplitsALine { page_size: usize, width: usize },
@@ -176,10 +179,15 @@ impl Display for Refusal {
                 f,
                 "Arg::paged: {axis:?} names the pages and their positions both, on one dim"
             ),
-            Refusal::PagesNotOutermost(axis) => write!(
+            Refusal::PagesAlongALine(axis) => write!(
                 f,
-                "Arg::paged: the pages along {axis:?} must be the buffer's outermost dim, which \
-                 the pool's page count is read off"
+                "Arg::paged: the pages along {axis:?} lie on the innermost dim, which a line runs \
+                 along, so a line would span pages"
+            ),
+            Refusal::PagingOfAnEmptyPool => write!(
+                f,
+                "Arg::paged: the pool holds no page, or its pages no position, for a table entry \
+                 to read"
             ),
             Refusal::PageSplitsALine { page_size, width } => write!(
                 f,

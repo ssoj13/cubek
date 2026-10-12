@@ -6,8 +6,10 @@
 //! direct over the logical `[…, sequence, …, position, …]` axes, so every window, walk and bound
 //! is the logical one; the table is resolved only where a coordinate becomes an offset
 //! ([`BufferLayout`](super::projection::BufferLayout)), at every offset taken, a masked cell's
-//! included. A table entry past the pool, a position past the table's columns and a sequence past
-//! its rows each read the last there is: a table is device data a launch may never have written.
+//! included. The pool is bound as it lies; the operand's extents along the two axes are the
+//! table's, read off it at launch, so nothing states them twice. A coordinate past the table reads
+//! the pool's first page without loading from the table, and a table entry past the pool its last:
+//! a table is device data a launch may never have written.
 
 use cubecl::prelude::*;
 
@@ -26,54 +28,87 @@ pub struct Paging {
 impl Paging {
     /// The buffer dims `projection` carries the two axes on, `(sequence, position)`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If either axis is not one dim's identity: a page is resolved digit for digit, so neither
-    /// axis may share a dim or be gathered.
-    pub(crate) fn dims(&self, projection: &Projection) -> (usize, usize) {
+    /// Either axis not one dim's identity, or both on one dim: a page is resolved digit for digit.
+    pub(crate) fn dims(&self, projection: &Projection) -> Result<(usize, usize), Refusal> {
         let dim = |axis: Axis| {
             (0..projection.physical_rank())
                 .find(|&pa| projection.physical_axis(pa).is_identity(axis))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Paging: {axis:?} must be one buffer dim's identity to be resolved \
-                         through a page table"
-                    )
-                })
+                .ok_or(Refusal::PagingOfAnUnlabelledAxis(axis))
         };
-        (dim(self.sequence), dim(self.position))
+        let (sequence, position) = (dim(self.sequence)?, dim(self.position)?);
+        match sequence == position {
+            true => Err(Refusal::PagingOfOneDim(self.sequence)),
+            false => Ok((sequence, position)),
+        }
+    }
+
+    /// What an operand read through a table owes, checked once for the build and the kernel both:
+    /// a direct, untiled mapping over a pool of pages, never packed, moved a line at a time, its
+    /// lines whole within a page and never along the pages.
+    ///
+    /// # Errors
+    ///
+    /// The [`Refusal`] naming the first thing the table cannot resolve.
+    pub(crate) fn validate(
+        &self,
+        projection: &Projection,
+        stored_tiles: &[(Axis, usize)],
+        packing: Packing,
+        delivery: Delivery,
+        width: usize,
+    ) -> Result<(), Refusal> {
+        if !projection.is_direct() || projection.is_tiled() || !stored_tiles.is_empty() {
+            return Err(Refusal::PagingOfAStatedLayout);
+        }
+        if packing != Packing::Plain
+            || !matches!(delivery, Delivery::SyncPerUnit | Delivery::AsyncPerUnit)
+        {
+            return Err(Refusal::PagingMovedByRuns);
+        }
+        let (sequence, position) = self.dims(projection)?;
+        let innermost = projection.physical_rank() - 1;
+        if sequence == innermost {
+            return Err(Refusal::PagesAlongALine(self.sequence));
+        }
+        if self.page_size == 0 {
+            return Err(Refusal::PagingOfAnEmptyPool);
+        }
+        if position == innermost && !self.page_size.is_multiple_of(width) {
+            return Err(Refusal::PageSplitsALine {
+                page_size: self.page_size,
+                width,
+            });
+        }
+        Ok(())
     }
 }
 
-/// The extent of a page table, `[sequences, pages_per_sequence]`: what an operand bound over a
-/// pool of pages reads as its sequences ([`Arg::paged`](crate::launch::Arg::paged)).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct PageTableShape {
-    pub sequences: usize,
-    pub pages_per_sequence: usize,
-}
-
 /// A page table as a kernel reads it: `u32`, `[sequences, pages_per_sequence]`, read by stride.
+/// Its shape is the operand's: the sequences it lists and their positions, `page_size` a column.
 #[derive(CubeType, Clone)]
 #[expand(derive(Clone))]
 pub(crate) struct PageTable {
     entries: Box<[u32]>,
     sequence_stride: u32,
     page_stride: u32,
-    /// The table's rows: a sequence past them reads the last.
-    sequences: u32,
-    pages_per_sequence: u32,
-    /// Pages the pool holds: a table entry past them reads the last, since a
-    /// table is device data a launch may never have written.
-    pool_pages: u32,
+    /// The table's rows: a sequence past them is outside the operand, and reads the pool's first
+    /// page without touching the table.
+    pub(crate) sequences: u32,
+    /// The table's columns: a position past them is likewise outside, and reads the first page.
+    pub(crate) pages_per_sequence: u32,
+    /// The pool's last page: a table entry past it reads it, since a table is device data a
+    /// launch may never have written.
+    last_page: u32,
     #[cube(comptime)]
-    page_size: usize,
+    pub(crate) page_size: usize,
     /// The buffer dim the pages lie along.
     #[cube(comptime)]
-    sequence_dim: usize,
+    pub(crate) sequence_dim: usize,
     /// The buffer dim a page's positions lie along.
     #[cube(comptime)]
-    position_dim: usize,
+    pub(crate) position_dim: usize,
     /// Positions one step of the position dim's coordinate covers: a line's width where the
     /// positions run along the innermost dim, which is addressed in lines; one elsewhere.
     #[cube(comptime)]
@@ -82,8 +117,8 @@ pub(crate) struct PageTable {
 
 #[cube]
 impl PageTable {
-    /// `table` resolving `paging`'s axes, which `projection` carries, an operand read `width`
-    /// values a line along its innermost dim.
+    /// `table` resolving `paging`'s axes, which `projection` carries, over a pool of `pool_pages`
+    /// pages, an operand read `width` values a line along its innermost dim.
     pub(crate) fn new(
         table: &Tensor<u32>,
         pool_pages: u32,
@@ -91,23 +126,23 @@ impl PageTable {
         #[comptime] projection: Projection,
         #[comptime] width: usize,
     ) -> PageTable {
-        let (sequence_dim, position_dim) = comptime!(paging.dims(&projection));
+        let (sequence_dim, position_dim) = comptime!(
+            paging
+                .dims(&projection)
+                .unwrap_or_else(|refusal| panic!("PageTable: {refusal}"))
+        );
         let unit = comptime!(match position_dim == projection.physical_rank() - 1 {
             true => width,
             false => 1,
         });
-        comptime!(assert!(
-            paging.page_size.is_multiple_of(unit),
-            "PageTable: a line of {unit} positions would cross a page of {}",
-            paging.page_size
-        ));
         PageTable {
             entries: unsafe { table.as_slice().as_boxed_unchecked() },
             sequence_stride: table.stride(0) as u32,
             page_stride: table.stride(1) as u32,
             sequences: table.shape(0) as u32,
             pages_per_sequence: table.shape(1) as u32,
-            pool_pages,
+            // A bound pool holds a page at least; one stated by hand is kept off underflow.
+            last_page: pool_pages.max_with(1u32).minus(1u32),
             page_size: comptime!(paging.page_size),
             sequence_dim,
             position_dim,
@@ -115,25 +150,44 @@ impl PageTable {
         }
     }
 
+    /// `pool`, the geometry of the pool as it lies, as the sequences this table lists: the table's
+    /// rows along the sequence dim and their positions along the position dim, over the pool's
+    /// strides.
+    pub(crate) fn sequences_over(&self, pool: &RuntimeGeometry) -> RuntimeGeometry {
+        let page_size = comptime!(self.page_size as u32);
+        let mut sequences = RuntimeGeometry::new();
+        #[unroll]
+        for pa in 0..pool.shape.len() {
+            let extent = if comptime!(pa == self.sequence_dim) {
+                self.sequences
+            } else if comptime!(pa == self.position_dim) {
+                self.pages_per_sequence.times(page_size)
+            } else {
+                pool.shape.at(pa)
+            };
+            sequences.push(extent, pool.strides.at(pa));
+        }
+        sequences
+    }
+
     /// `digits`, a logical coordinate along each buffer dim, with the sequence's digit replaced
     /// by the page its position lies in and the position's by its row there.
     ///
-    /// A position past the sequence's last page reads that page, and a sequence past the table's
-    /// last row that row: a masked read asks for its offset before the mask drops it, and the
-    /// table holds nothing past its rows and columns to index.
+    /// A coordinate outside the table, which only a masked read asks for before the mask drops
+    /// it, reads the pool's first page and never loads past the table: the table may be empty.
     pub(crate) fn resolve(&self, digits: &Coords<u32>) -> Coords<u32> {
         let page_size = comptime!(self.page_size as u32);
         let unit = comptime!(self.unit as u32);
+        let sequence = digits.at(comptime!(self.sequence_dim));
         let position = digits.at(comptime!(self.position_dim)).times(unit);
-        let logical = position
-            .divided_by(page_size)
-            .min_with(self.pages_per_sequence.minus(1u32));
-        let at = digits
-            .at(comptime!(self.sequence_dim))
-            .min_with(self.sequences.minus(1u32))
-            .times(self.sequence_stride)
-            .plus(logical.times(self.page_stride));
-        let page = self.entries[at.cast::<usize>()].min_with(self.pool_pages.minus(1u32));
+        let logical = position.divided_by(page_size);
+        let mut page = 0u32;
+        if sequence < self.sequences && logical < self.pages_per_sequence {
+            let at = sequence
+                .times(self.sequence_stride)
+                .plus(logical.times(self.page_stride));
+            page = self.entries[at.cast::<usize>()].min_with(self.last_page);
+        }
         let mut resolved = Coords::<u32>::new();
         #[unroll]
         for pa in 0..digits.len() {

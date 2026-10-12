@@ -53,9 +53,9 @@ impl<T: Numeric> GlobalOperand<T> {
     }
 
     /// [`tensor`](GlobalOperand::tensor) over a pool of pages, read as the sequences `table` names
-    /// ([`Paging`]): the spec states which axes the table resolves, and the tensor's shape is the
-    /// logical one, its sequences and their positions, over the pool's strides. A pool is never
-    /// packed, so `T` is `E`'s scalar.
+    /// ([`Paging`]): the spec states which axes the table resolves, the tensor is the pool as it
+    /// lies, and the operand's extent along the two axes is the table's. A pool is never packed,
+    /// so `T` is `E`'s scalar.
     pub fn paged<E: CubePrimitive>(
         tensor: &Tensor<E>,
         table: &Tensor<u32>,
@@ -73,23 +73,25 @@ impl<T: Numeric> GlobalOperand<T> {
             "GlobalOperand::paged: the spec states no paging for the table to resolve"
         )));
         let projection = comptime!(spec.projection.clone());
-        // The pool's pages, off the buffer bound: the operand's shape is the
-        // sequences', its sequence dim's stride the pool's page.
-        let (sequence_dim, _) = comptime!(paging.dims(&projection));
-        let pool_pages = (tensor.buffer_len() * tensor.vector_size()) / tensor.stride(sequence_dim);
+        let (sequence_dim, _) = comptime!(
+            paging
+                .dims(&projection)
+                .unwrap_or_else(|refusal| panic!("GlobalOperand::paged: {refusal}"))
+        );
+        let table = PageTable::new(
+            table,
+            tensor.shape(sequence_dim) as u32,
+            paging,
+            projection,
+            tensor.vector_size(),
+        );
         GlobalOperand::<T>::of_tensor::<E>(
             tensor,
             space,
             spec,
             Coords::<u32>::new(),
             Coords::<i32>::new(),
-            ComptimeOption::new_Some(PageTable::new(
-                table,
-                pool_pages as u32,
-                paging,
-                projection,
-                tensor.vector_size(),
-            )),
+            ComptimeOption::new_Some(table),
         )
     }
 
@@ -137,7 +139,7 @@ impl<T: Numeric> GlobalOperand<T> {
     }
 
     /// The shared body: `E` is the binding element, `T` the served scalar, `paging` the table a
-    /// pool of pages is read through.
+    /// pool of pages is read through, which sets the operand's extent along its two axes.
     fn of_tensor<E: CubePrimitive>(
         tensor: &Tensor<E>,
         #[comptime] space: Space,
@@ -153,9 +155,15 @@ impl<T: Numeric> GlobalOperand<T> {
                 .downcast_unchecked::<T>()
                 .as_boxed_unchecked()
         });
+        let pool = RuntimeGeometry::of_tensor::<E>(tensor, rank);
+        #[comptime]
+        let geometry = match &paging {
+            ComptimeOption::Some(table) => table.sequences_over(&pool),
+            ComptimeOption::None => pool,
+        };
         GlobalOperand::<T> {
             backing,
-            geometry: RuntimeGeometry::of_tensor::<E>(tensor, rank),
+            geometry,
             bound_width: tensor.vector_size(),
             space,
             spec,
@@ -382,7 +390,16 @@ fn check_operand(space: &Space, spec: &TileSpec, vector_size: usize) {
     }
     projection.validate_composition(|axis| space.extent(axis));
     if let Some(paging) = &spec.paging {
-        check_paging(paging, spec);
+        let checked = paging.validate(
+            projection,
+            &spec.stored_tiles,
+            spec.packing,
+            spec.delivery,
+            vector_size,
+        );
+        if let Err(refusal) = checked {
+            panic!("GlobalOperand: {refusal}");
+        }
     }
     let coord_rank = projection.coordinate_rank();
     assert!(
@@ -476,32 +493,4 @@ fn gathered_origin(
             (start, residue.cast::<u32>())
         }
     }
-}
-
-/// What a paged operand owes: a page is resolved digit for digit over a plain, untiled buffer,
-/// and only through the layout, one line at a time.
-fn check_paging(paging: &Paging, spec: &TileSpec) {
-    let projection = &spec.projection;
-    assert!(
-        projection.is_direct() && !projection.is_tiled() && spec.stored_tiles.is_empty(),
-        "GlobalOperand: a pool of pages is read through a direct, untiled mapping"
-    );
-    assert!(
-        spec.packing == Packing::Plain,
-        "GlobalOperand: a pool of pages is read at the element it holds, not packed"
-    );
-    assert!(
-        matches!(
-            spec.delivery,
-            Delivery::SyncPerUnit | Delivery::AsyncPerUnit
-        ),
-        "GlobalOperand: a pool of pages is moved a line at a time, each through its table; \
-         {:?} moves runs the table does not resolve",
-        spec.delivery
-    );
-    let (sequence, _) = paging.dims(projection);
-    assert!(
-        sequence != projection.physical_rank() - 1,
-        "GlobalOperand: a line runs along the innermost dim, so it cannot name pages"
-    );
 }
