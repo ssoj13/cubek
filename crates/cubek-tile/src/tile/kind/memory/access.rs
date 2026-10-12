@@ -150,6 +150,12 @@ impl<T: Numeric> Memory<T> {
         &mut self,
         layout: BufferLayout,
     ) -> ViewMut<'_, Vector<T, W>, CoordsDyn> {
+        // Two sequences may share a page, and an entry past the pool is read as its last.
+        comptime!(assert!(
+            layout.paging.is_none(),
+            "Memory::write_view: a pool of pages is read through its table, never written \
+             through it; write the pool where it lies"
+        ));
         match &mut self.store.backing {
             Backing::Buffer(buffer) => buffer
                 .as_vectorized_mut()
