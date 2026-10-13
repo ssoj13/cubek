@@ -747,13 +747,14 @@ impl<T: Numeric> Tile<T> {
     /// it, and the cube synchronizes again before anything writes the box.
     ///
     /// A source whose scales a stage keeps beside it copies its values as they are stored, into a
-    /// stage that keeps them too; the stage's fill brings the scales.
+    /// stage that keeps them too; the stage's fill brings the scales. Any other scaled source is
+    /// written with its scales applied, which only [`dequantize_from`](Tile::dequantize_from) does.
     pub fn copy_from(&mut self, src: &Tile<T>) {
-        let (decodes, into_memory) = (src.decodes(), self.is_memory());
+        let decodes = src.decodes();
         comptime!(assert!(
-            !decodes || into_memory,
-            "Tile::copy_from: a scaled source decodes into memory only; to load it into \
-             fragments, contract it: the fragment lands it"
+            !decodes,
+            "Tile::copy_from: this source carries scales or a table that a copy as stored cannot \
+             keep; write it with them applied (`Tile::dequantize_from`)"
         ));
         let (beside, kept) = (src.scales_beside(), self.scales_beside());
         comptime!(assert!(
@@ -761,10 +762,39 @@ impl<T: Numeric> Tile<T> {
             "Tile::copy_from: this source's scales are kept beside its values, which only a stage \
              that keeps them too takes as they are stored"
         ));
-        if comptime!(decodes) {
-            self.copy_scaled_from(src);
-        } else {
-            self.copy_unscaled_from(src);
+        self.copy_unscaled_from(src);
+    }
+
+    /// Writes `src`'s numbers into this tile, every scale it carries applied and its table looked
+    /// up: the one copy that applies a tile's scales.
+    ///
+    /// From memory, each load is decoded once, in the unit that reads it, its scales multiplied
+    /// together in `f32` and the value rounded once. From an accumulator, the sum is multiplied by
+    /// the scale it carries as it drains; the sum is spent by its write.
+    pub fn dequantize_from<S: Numeric>(&mut self, src: &Tile<S>) {
+        match &src.kind {
+            TileKind::Memory(_) => {
+                let into_memory = self.is_memory();
+                comptime!(assert!(
+                    into_memory,
+                    "Tile::dequantize_from: values are decoded into memory; to load them into \
+                     fragments, contract them: the fragment lands them"
+                ));
+                self.copy_scaled_from(src);
+            }
+            TileKind::PlaneTile(_) | TileKind::PlanePartition(_) => {
+                let mut sum = src.clone();
+                let levels = src.factor_levels();
+                if comptime!(levels > 0) {
+                    sum.scale_by(S::cast_from(src.factor.whole()));
+                }
+                let dest = self.clone();
+                sum.drained_into(&dest);
+            }
+            TileKind::TmaGmem(_) | TileKind::Procedural(_) | TileKind::Lines(_) => panic!(
+                "Tile::dequantize_from: values are decoded from memory, and a sum from its \
+                 fragments; a tensor-map source lands bytes as they lie, so stage it first"
+            ),
         }
     }
 
@@ -1068,6 +1098,19 @@ impl<E: Numeric> Tile<E> {
         unexpanded!()
     }
 
+    /// This tile without its outer scales that vary only along axes of `space`, and those scales.
+    /// With `space` the output's, they are the scales a sum over the rest of the values' axes takes
+    /// out of every term and applies once ([`scaled`](Tile::scaled)), and the tile left carries
+    /// the ones each term needs.
+    pub fn factor(&self, _space: Space) -> (Tile<E>, Factor) {
+        unexpanded!()
+    }
+
+    /// This tile under `factor`'s scales, outside its own.
+    pub fn scaled(&self, _factor: &Factor) -> Tile<E> {
+        unexpanded!()
+    }
+
     /// These values read placed: an `e2m1` field the device emulates decoded without its lift,
     /// which the factor this tile is read under carries instead ([`reader`](Tile::reader)), one
     /// multiply a reader rather than one a value. What a leaf that applies the factor to every
@@ -1226,6 +1269,23 @@ impl<E: Numeric> TileExpand<E> {
             ComptimeOptionExpand::Some(level) => self.__expand_mul_method(scope, level),
             ComptimeOptionExpand::None => self.clone(),
         }
+    }
+
+    pub fn __expand_factor_method(
+        &self,
+        _scope: &Scope,
+        space: Space,
+    ) -> (TileExpand<E>, FactorExpand) {
+        let (inner, outer) = self.factor.split_on(&space);
+        let mut values = self.clone();
+        values.factor = inner;
+        (values, outer)
+    }
+
+    pub fn __expand_scaled_method(&self, _scope: &Scope, factor: &FactorExpand) -> TileExpand<E> {
+        let mut out = self.clone();
+        out.factor = out.factor.and(factor.clone());
+        out
     }
 
     pub(crate) fn __expand_placed_method(&self, _scope: &Scope) -> TileExpand<E> {

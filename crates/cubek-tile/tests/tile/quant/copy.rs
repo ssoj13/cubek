@@ -115,7 +115,7 @@ fn block_scaled_copy<O: Numeric, V: Size>(
     let values = values.tile_as::<O>(&space);
     let scales = scales.tile(&space);
     let mut output = output.tile(&space);
-    output.copy_from(&values.mul(&scales));
+    output.dequantize_from(&values.mul(&scales));
 }
 
 /// `out = values ⊗ scales ⊗ global`: two levels, innermost first.
@@ -132,7 +132,7 @@ fn two_level_scaled_copy<O: Numeric, V: Size>(
     let scales = scales.tile(&space);
     let global = global.tile(&space);
     let mut output = output.tile(&space);
-    output.copy_from(&values.mul(&scales).mul(&global));
+    output.dequantize_from(&values.mul(&scales).mul(&global));
 }
 
 /// Block-scaled packed values: each `bm×bn` block carries its own scale, looked up at the
@@ -277,7 +277,7 @@ fn batched_scaled_stage<O: Numeric, V: Size>(
             StageStorage::Strided,
             0usize,
         );
-        stage.copy_from(&decoded.at(&cube));
+        stage.dequantize_from(&decoded.at(&cube));
         sync_cube();
         let mut out = output.at(&cube);
         out.copy_from(&stage);

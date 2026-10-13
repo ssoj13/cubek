@@ -2745,7 +2745,7 @@ fn packed_scaled_copy<O: Numeric, V: Size>(
     let input = input.tile_as::<O>(&space);
     let scales = scales.tile(&space);
     let mut output = output.tile(&space);
-    output.copy_from(&input.mul(&scales));
+    output.dequantize_from(&input.mul(&scales));
 }
 
 /// Eight-bit fields and one scale per block of sixteen, decoded by the copy that states them: the
@@ -2856,7 +2856,7 @@ fn looked_up_copy<O: Numeric, V: Size>(
     let table = table.tile(&space);
     let scales = scales.tile(&space);
     let mut output = output.tile(&space);
-    output.copy_from(&input.lookup(&table).mul(&scales));
+    output.dequantize_from(&input.lookup(&table).mul(&scales));
 }
 
 /// Eight-bit indices into a table of 256 entries, scaled per block of sixteen: each field names

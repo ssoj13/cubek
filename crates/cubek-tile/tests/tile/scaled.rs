@@ -113,6 +113,42 @@ fn scaled_matmul_promoted<E: Numeric, S: Numeric>(
     acc.drained_into(&c);
 }
 
+/// `c = (a ⊗ blocks ⊗ global) · b`, the global factored out of the sum: each term carries its
+/// block scale, and the scale over the whole operand multiplies the sum once, as it drains.
+#[cube(launch)]
+#[allow(clippy::too_many_arguments)]
+fn factored_matmul<E: Numeric, S: Numeric>(
+    a: &TileArg<'_, E, Const<1>>,
+    b: &TileArg<'_, E, Const<1>>,
+    blocks: &TileArg<'_, S, Const<1>>,
+    global: &TileArg<'_, S, Const<1>>,
+    c: &TileArg<'_, E, Const<1>>,
+    space: Partitioning,
+    #[comptime] level: Level,
+    #[define(E, S)] _dtypes: [ElemType; 2],
+) {
+    let a = a
+        .tile(&space)
+        .mul(&blocks.tile(&space))
+        .mul(&global.tile(&space));
+    let b = b.tile(&space);
+    let mut c = c.tile(&space);
+    let (a, a_factor) = a.factor(c.space());
+    let acc = c.accumulator::<E, E, E>(
+        &a,
+        &b,
+        comptime!(Instruction::Registers {
+            config: REGISTER_BLOCK
+        }),
+        Semiring::SUM_PROD,
+    );
+    for region in space.over(&level) {
+        let mut acc_r = acc.at(&region);
+        acc_r.mma(&a.at(&region), &b.at(&region));
+    }
+    c.dequantize_from(&acc.scaled(&a_factor));
+}
+
 /// [`scaled_matmul`] with two scale levels: block scales, and one factor over the whole tensor.
 #[cube(launch)]
 fn two_level_scaled_matmul<E: Numeric, S: Numeric>(
@@ -278,6 +314,110 @@ fn two_levels_fold_in_order() {
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
         Scaled::Lhs,
+        [dtype, dtype],
+    );
+
+    let got = HostData::from_tensor_handle(&client, c, HostDataType::F32);
+    for m in 0..rows {
+        for n in 0..cols {
+            let want: f32 = (0..depth)
+                .map(|k| a[m * depth + k] * s[m * blocks + k / block] * g[0] * b[k * cols + n])
+                .sum();
+            let have = got.get_f32(&[m, n]);
+            assert!(
+                (have - want).abs() < 1e-3,
+                "at ({m}, {n}): got {have}, want {want}"
+            );
+        }
+    }
+}
+
+/// [`factored_matmul`]: the global leaves the operand for the sum and is applied once as it
+/// drains, the block scales staying with every term; the result is the same product.
+#[test]
+fn a_scale_over_the_whole_operand_applies_once_as_the_sum_drains() {
+    let (rows, cols, block, blocks) = (4, 4, 8, 2);
+    let depth = block * blocks;
+
+    let client = cubecl::test_device().client();
+    let dtype = f32::elem_type_native();
+    let a: Vec<f32> = (0..rows * depth).map(|i| (i % 5) as f32 - 2.0).collect();
+    let b: Vec<f32> = (0..depth * cols).map(|i| (i % 7) as f32 - 3.0).collect();
+    let s: Vec<f32> = (0..rows * blocks).map(|i| (i as f32 + 1.0) / 2.0).collect();
+    let g = vec![0.25f32];
+
+    let (a_t, _) = TestInput::builder(client.clone(), shape![rows, depth])
+        .dtype(dtype)
+        .custom(a.clone())
+        .generate_with_f32_host_data();
+    let (b_t, _) = TestInput::builder(client.clone(), shape![depth, cols])
+        .dtype(dtype)
+        .custom(b.clone())
+        .generate_with_f32_host_data();
+    let (s_t, _) = TestInput::builder(client.clone(), shape![rows, blocks])
+        .dtype(dtype)
+        .custom(s.clone())
+        .generate_with_f32_host_data();
+    let (g_t, _) = TestInput::builder(client.clone(), shape![1])
+        .dtype(dtype)
+        .custom(g.clone())
+        .generate_with_f32_host_data();
+    let c = TestInput::builder(client.clone(), shape![rows, cols])
+        .dtype(dtype)
+        .zeros()
+        .generate_without_host_data();
+
+    let launcher = implied(
+        &client,
+        Partitioning::new(
+            Space::new(&[(M, rows), (N, cols), (KB, blocks), (KI, block)]),
+            Levels::leaf(&[(M, rows), (N, cols), (KB, 1), (KI, block)])
+                .walk_every(&[M, N, KB, KI])
+                .build(),
+        ),
+        Form::Static,
+    );
+
+    let a_projection = Projection::new(
+        &[M, KB, KI],
+        &[
+            PhysicalAxisMap::of(M),
+            PhysicalAxisMap::disjoint(&[(KB, block), (KI, 1)]),
+        ],
+    );
+    factored_matmul::launch(
+        &client,
+        launcher.cube_count(),
+        launcher.cube_dim(),
+        TileArgLaunch::new(
+            a_t.binding().into_tensor_arg(),
+            TileSpec::new(a_projection.clone()),
+        ),
+        TileArgLaunch::new(
+            b_t.binding().into_tensor_arg(),
+            TileSpec::new(Projection::new(
+                &[KB, KI, N],
+                &[
+                    PhysicalAxisMap::disjoint(&[(KB, block), (KI, 1)]),
+                    PhysicalAxisMap::of(N),
+                ],
+            )),
+        ),
+        TileArgLaunch::new(
+            s_t.binding().into_tensor_arg(),
+            TileSpec::new(a_projection.scales_per(KB)),
+        ),
+        TileArgLaunch::new(
+            g_t.binding().into_tensor_arg(),
+            // Same axes as the level below it, addressing neither: one value over all their tiles.
+            TileSpec::new(Projection::new(&[M, KB], &[PhysicalAxisMap::broadcast()])),
+        ),
+        TileArgLaunch::new(
+            c.clone().binding().into_tensor_arg(),
+            TileSpec::direct(&[M, N]),
+        ),
+        launcher.partitioning_arg(),
+        launcher.partitioning().level(0),
         [dtype, dtype],
     );
 
@@ -2430,11 +2570,11 @@ fn decoded_tile_order_copy<E: Numeric, S: Numeric, SS: Numeric>(
         let decoded = b.at(&cube).mul(&scale.at(&cube));
         let mut out_cube = out.at(&cube);
         match comptime!(through) {
-            CopiedThrough::Directly => out_cube.copy_from(&decoded),
+            CopiedThrough::Directly => out_cube.dequantize_from(&decoded),
             CopiedThrough::ABlockAtATime => {
                 for block in cube.walk() {
                     let mut out_block = out_cube.at(&block);
-                    out_block.copy_from(&decoded.at(&block));
+                    out_block.dequantize_from(&decoded.at(&block));
                 }
             }
             CopiedThrough::AStage => {
@@ -2816,11 +2956,11 @@ fn scaled_copy<E: Numeric, S: Numeric>(
     let mut out = out.tile(&space);
     if comptime!(staged) {
         let mut stage = Tile::<E>::shared(comptime!(space.space().clone()), StageStorage::Strided);
-        stage.copy_from(&a.mul(&scale));
+        stage.dequantize_from(&a.mul(&scale));
         sync_cube();
         out.copy_from(&stage);
     } else {
-        out.copy_from(&a.mul(&scale));
+        out.dequantize_from(&a.mul(&scale));
     }
 }
 

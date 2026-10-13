@@ -176,7 +176,7 @@ impl Meeting {
         let space = comptime!(dst.place.space.clone());
         let element = src.stage_element();
         if comptime!(element == StageElement::Decoded) {
-            dst.copy_from(src);
+            dst.dequantize_from(src);
         } else {
             self.fill_as_it_lies(dst, src, space);
             dst.fill_scales_from(src, self);

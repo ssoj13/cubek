@@ -32,7 +32,7 @@ fn tiled_scaled_copy<O: Numeric, V: Size, W: Size>(
     let values = values.tile_as::<O>(&space);
     let scales = scales.tile(&space);
     let mut output = output.tile(&space);
-    output.copy_from(&values.mul(&scales));
+    output.dequantize_from(&values.mul(&scales));
 }
 
 /// `stage = values` as the words they are, then `output = unpack(stage) ⊗ scales`: the weight
@@ -52,7 +52,7 @@ fn tiled_packed_stage<O: Numeric, V: Size, W: Size>(
     let mut stage = values.stage(level, StageStorage::Strided);
     stage.copy_from(&values);
     sync_cube();
-    output.copy_from(&stage.mul(&scales));
+    output.dequantize_from(&stage.mul(&scales));
 }
 
 /// Where the weight is decoded from.

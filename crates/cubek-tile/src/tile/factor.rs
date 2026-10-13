@@ -1,5 +1,6 @@
-//! A factor these values carry ([`Tile::mul`](crate::Tile::mul)): scale tiles windowed with the
-//! values and multiplied in where a kernel copies or contracts them. Levels are innermost first.
+//! The scales a tile carries ([`Tile::mul`](crate::Tile::mul)): scale tiles windowed with the
+//! values, never applied by the tile itself. Levels are innermost first, so each covers more than
+//! the one before it.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -127,12 +128,14 @@ impl<S: Numeric> FactorRead for TileExpand<S> {
     }
 }
 
-/// The scales an operand's values carry, innermost first; empty when none.
+/// The scales a tile carries, innermost first; empty when none. What
+/// [`Tile::factor`](crate::Tile::factor) takes out of a tile and
+/// [`Tile::scaled`](crate::Tile::scaled) puts on one.
 #[derive(Clone)]
-pub(crate) struct Factor;
+pub struct Factor;
 
 #[derive(Clone, Default)]
-pub(crate) struct FactorExpand {
+pub struct FactorExpand {
     pub(crate) levels: Vec<FactorLevel>,
 }
 
@@ -154,6 +157,12 @@ impl Factor {
 
     /// The scale covering the value at `coords`: the product of every level.
     pub(crate) fn at_coords(&self, _coords: &Coords<u32>, _values: Space) -> f32 {
+        unexpanded!()
+    }
+
+    /// The one scale every value shares: the product of every level, none of which varies along
+    /// any axis.
+    pub(crate) fn whole(&self) -> f32 {
         unexpanded!()
     }
 
@@ -183,6 +192,32 @@ impl FactorExpand {
                 read: Arc::new(scale.clone()),
             }],
         }
+    }
+
+    /// This factor split in two: the outer levels whose scales vary only along axes of `space`,
+    /// and the rest. Each level covers more than the one inside it, so once a level varies along
+    /// an axis outside `space`, every level inside it does too: the levels taken are always the
+    /// outermost.
+    pub(crate) fn split_on(&self, space: &Space) -> (FactorExpand, FactorExpand) {
+        let kept = self
+            .levels
+            .iter()
+            .rposition(|level| {
+                level
+                    .space
+                    .axes()
+                    .any(|axis| level.projection.addresses(axis) && !space.contains(axis))
+            })
+            .map_or(0, |inner| inner + 1);
+        let (inner, outer) = self.levels.split_at(kept);
+        (
+            FactorExpand {
+                levels: inner.to_vec(),
+            },
+            FactorExpand {
+                levels: outer.to_vec(),
+            },
+        )
     }
 
     /// This factor with `coarser`'s levels after its own.
@@ -256,6 +291,25 @@ impl FactorExpand {
             });
         }
         product.unwrap_or_else(|| ExpandValue::constant(1u64.into(), f32::elem_type(scope)).into())
+    }
+
+    pub(crate) fn __expand_whole_method(&self, scope: &Scope) -> NativeExpand<f32> {
+        let mut product: NativeExpand<f32> =
+            ExpandValue::constant(1u64.into(), f32::elem_type(scope)).into();
+        for level in &self.levels {
+            assert!(
+                level
+                    .space
+                    .axes()
+                    .all(|axis| !level.projection.addresses(axis)),
+                "Factor::whole: a scale that varies across the output is applied where the output \
+                 is written through memory, not on the sum's fragments"
+            );
+            let origin = origin_of(scope, &level.space);
+            let one = level.read.scale_for(scope, &origin, &level.space);
+            product = MulExpand::__expand_mul_method(product, scope, one);
+        }
+        product
     }
 
     pub(crate) fn __expand_holds_words_method(&self, _scope: &Scope) -> bool {

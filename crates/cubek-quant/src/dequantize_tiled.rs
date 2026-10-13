@@ -17,8 +17,8 @@ const N: Axis = Axis(1);
 /// Very WIP and naive implementation for now.
 ///
 /// The decode is the kernel's own statement: the values are fields of the scheme's element read
-/// out of words, and `output.copy_from(&values.mul(&scale))` multiplies each by the scale where it
-/// is copied. Nothing decodes behind a read.
+/// out of words, and `output.dequantize_from(&values.mul(&scale))` multiplies each by the scale
+/// where it is written. Nothing decodes behind a read.
 pub fn launch_ref(
     client: &Client,
     input: TensorBinding,
@@ -122,5 +122,5 @@ pub fn dequantize<O: Numeric, V: Size>(
     let input = input.tile_as::<O>(&space);
     let scale = scale.tile(&space);
     let mut output = output.tile(&space);
-    output.copy_from(&input.mul(&scale));
+    output.dequantize_from(&input.mul(&scale));
 }

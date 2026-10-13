@@ -6,15 +6,15 @@ use crate::*;
 
 #[cube]
 impl<T: Numeric> Tile<T> {
-    /// [`copy_from`](Tile::copy_from) a source carrying a table or scales, read in the source's
-    /// own loads ([`vector_tile`](Tile::vector_tile)), a run or a rectangle of its stored tiles.
-    /// The source may carry extra axes only if each is one wide.
-    pub(crate) fn copy_scaled_from(&mut self, src: &Tile<T>) {
+    /// [`dequantize_from`](Tile::dequantize_from) a source in memory, read in the source's own
+    /// loads ([`vector_tile`](Tile::vector_tile)), a run or a rectangle of its stored tiles. The
+    /// source may carry extra axes only if each is one wide.
+    pub(crate) fn copy_scaled_from<S: Numeric>(&mut self, src: &Tile<S>) {
         // It decodes in the unit that loads each line; an async copy lands the bytes as they lie.
         let delivery = src.delivery();
         comptime!(assert!(
             !delivery.is_async(),
-            "Tile::copy_from: a decoding copy cannot be delivered {delivery:?}; deliver it \
+            "Tile::dequantize_from: a decoding copy cannot be delivered {delivery:?}; deliver it \
              SyncPerUnit, or stage it as it lies and decode out of the stage"
         ));
         let load = src.vector_tile();
@@ -34,9 +34,9 @@ impl<T: Numeric> Tile<T> {
 
     /// The copy, over `stored`: the source's loads as its buffer holds them, cyclically across
     /// the units that fill this tile.
-    fn copy_decoded<I: Numeric, WP: Size>(
+    fn copy_decoded<S: Numeric, I: Numeric, WP: Size>(
         &mut self,
-        src: &Tile<T>,
+        src: &Tile<S>,
         stored: Masked<'_, Vector<I, WP>, CoordsDyn>,
     ) {
         let (load, lands) = (src.vector_tile(), self.vector_tile());
@@ -58,7 +58,7 @@ impl<T: Numeric> Tile<T> {
             for t in 0..comptime!(loads.div_ceil(units)) {
                 let line = FillUnits::worker(fill) as u32 + comptime!((t * units) as u32);
                 if comptime!((t + 1) * units <= loads) {
-                    src.decode_load_into::<I, WP, VW>(
+                    src.decode_load_into::<T, I, WP, VW>(
                         &stored,
                         &mut out,
                         line,
@@ -67,7 +67,7 @@ impl<T: Numeric> Tile<T> {
                     );
                 } else {
                     if line < comptime!(loads as u32) {
-                        src.decode_load_into::<I, WP, VW>(
+                        src.decode_load_into::<T, I, WP, VW>(
                             &stored,
                             &mut out,
                             line,
@@ -81,7 +81,7 @@ impl<T: Numeric> Tile<T> {
             let first = FillUnits::worker(fill) as u32;
             let stride = FillUnits::workers(fill) as u32;
             for line in range_stepped(first, comptime!(loads as u32), stride) {
-                src.decode_load_into::<I, WP, VW>(
+                src.decode_load_into::<T, I, WP, VW>(
                     &stored,
                     &mut out,
                     line,
@@ -94,10 +94,10 @@ impl<T: Numeric> Tile<T> {
 
     /// This source's `line`-th load, read out of `stored`, decoded under its table and scales
     /// into `out`, a window spanning `dst` written in `lands`.
-    fn decode_load_into<I: Numeric, WP: Size, VW: Size>(
+    fn decode_load_into<O: Numeric, I: Numeric, WP: Size, VW: Size>(
         &self,
         stored: &Masked<'_, Vector<I, WP>, CoordsDyn>,
-        out: &mut MaskedMut<'_, Vector<T, VW>, CoordsDyn>,
+        out: &mut MaskedMut<'_, Vector<O, VW>, CoordsDyn>,
         line: u32,
         #[comptime] dst: Space,
         #[comptime] lands: VectorTile,
@@ -111,7 +111,7 @@ impl<T: Numeric> Tile<T> {
         let lift = comptime!(packing.lift());
         let space = comptime!(self.place.space.clone());
         let rank = comptime!(space.rank());
-        let mem = self.mem("Tile::copy_from");
+        let mem = self.mem("Tile::dequantize_from");
         let start = load.start(line, &space);
         let held = stored.read(load.index(&start, &space));
         // The destination lines this load holds, `offset` their place in it, and where they land.
@@ -136,7 +136,7 @@ impl<T: Numeric> Tile<T> {
             // its product with the value is not.
             let scaled = Vector::<f32, VW>::cast_from(mem.codebook.entries(values))
                 * Vector::<f32, VW>::cast_from(scale);
-            let decoded = Vector::<T, VW>::cast_from(scaled);
+            let decoded = Vector::<O, VW>::cast_from(scaled);
             out.write(lands.index(&to, &dst), decoded);
         }
     }
@@ -147,13 +147,13 @@ impl<T: Numeric> Tile<T> {
 fn check_decoding_copy(src: &Space, dst: &Space, load: &VectorTile, vw: usize, varies: bool) {
     assert!(
         src.axes().all(|axis| !src.is_dynamic(axis)),
-        "Tile::copy_from: a decoding copy reads its window through the values' own axes, which \
+        "Tile::dequantize_from: a decoding copy reads its window through the values' own axes, which \
          needs their extents at expansion; this window spans a dynamic axis. Copy a region a level \
          cuts to (a stage, a leaf) rather than the whole dynamic tile"
     );
     assert!(
         src.narrows_to(dst),
-        "Tile::copy_from: a decoding copy writes the box it reads, and {src:?} does not narrow to \
+        "Tile::dequantize_from: a decoding copy writes the box it reads, and {src:?} does not narrow to \
          {dst:?} by dropping one-wide axes"
     );
     // A destination line is `vw` consecutive values along its innermost axis, so it sits inside
@@ -165,7 +165,7 @@ fn check_decoding_copy(src: &Space, dst: &Space, load: &VectorTile, vw: usize, v
         .expect("a load holds at least one value");
     assert!(
         vw == 1 || (finest == along && run.is_multiple_of(vw)),
-        "Tile::copy_from: a decoding copy reads each destination line out of one load, and a \
+        "Tile::dequantize_from: a decoding copy reads each destination line out of one load, and a \
          {vw}-wide line along {along:?} does not sit inside a load of {:?}",
         load.extents()
     );
