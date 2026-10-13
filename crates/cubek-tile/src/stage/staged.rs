@@ -72,6 +72,7 @@ impl<T: Numeric> Memory<T> {
                         comptime!(level.clone()),
                         comptime!(read),
                     )),
+                    factor: Factor::none(),
                     place: comptime!(Placement::new(
                         level.child(&operand.place.space),
                         operand.place.depth + 1,

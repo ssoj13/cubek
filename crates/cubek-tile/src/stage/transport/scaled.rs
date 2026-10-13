@@ -45,10 +45,7 @@ impl<T: Numeric> Tile<T> {
         let space = comptime!(src.place.space.clone());
         let dst = comptime!(self.place.space.clone());
         let along = comptime!(dst.axis_at(dst.rank() - 1));
-        let varies = src
-            .mem("Tile::copy_from")
-            .factor
-            .varies_along(comptime!(along));
+        let varies = src.factor.varies_along(comptime!(along));
         comptime!(check_decoding_copy(&space, &dst, &load, vw, varies));
         let fill = self.fill_units();
         let units = comptime!(fill.count);
@@ -133,7 +130,7 @@ impl<T: Numeric> Tile<T> {
                 }
             }
             let values = values_at::<T, I, WP, VW>(held, offset, packing);
-            let scale = mem.factor.at_coords(&at, comptime!(space.clone())) * lift;
+            let scale = self.factor.at_coords(&at, comptime!(space.clone())) * lift;
             // Multiplied in `f32`, rounded to `T` once: a placed `e2m1` value is a lift short,
             // which the scale carries, and the lift times a scale is past a half's range where
             // its product with the value is not.

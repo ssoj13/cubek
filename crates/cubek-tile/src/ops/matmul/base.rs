@@ -97,7 +97,11 @@ impl<Acc: Numeric> Tile<Acc> {
             TileKind::Memory(g) => {
                 let mut g = g.clone();
                 g.set_contraction(comptime!(Contraction { block, semiring }));
-                Tile::new(TileKind::new_Memory(g), comptime!(self.place.clone()))
+                Tile::<Acc> {
+                    kind: TileKind::new_Memory(g),
+                    factor: self.factor.clone(),
+                    place: comptime!(self.place.clone()),
+                }
             }
             TileKind::PlaneTile(_)
             | TileKind::PlanePartition(_)

@@ -650,6 +650,7 @@ impl<T: Numeric> PlanePartition<T> {
                 held: Scratch::None,
             }),
             // A `Dynamic` extent here is never read; fragments were sized from the statement.
+            factor: Factor::none(),
             place: comptime!(Placement::new(space, depth, levels)),
         }
     }
@@ -735,6 +736,7 @@ impl<T: Numeric> PlanePartition<T> {
                 scratch: ComptimeOption::new_None(),
                 held: Scratch::None,
             }),
+            factor: Factor::none(),
             place: comptime!(Placement::new(window, depth, levels)),
         }
     }

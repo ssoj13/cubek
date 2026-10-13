@@ -221,8 +221,8 @@ impl<Acc: Numeric> Accumulate<Acc> for Tile<Acc> {
                         let slot = shared.clone().map(|s| &s[start..start + cells]);
                         frags.push(p.frags.index(i).clone().with_scratch(slot));
                     }
-                    Tile::new(
-                        TileKind::new_PlanePartition(PlanePartition::<Acc> {
+                    Tile::<Acc> {
+                        kind: TileKind::new_PlanePartition(PlanePartition::<Acc> {
                             frags,
                             m_tiles: comptime!(p.m_tiles),
                             n_tiles: comptime!(p.n_tiles),
@@ -233,8 +233,9 @@ impl<Acc: Numeric> Accumulate<Acc> for Tile<Acc> {
                             ),
                             held: comptime!(scratch),
                         }),
-                        comptime!(self.place.clone()),
-                    )
+                        factor: self.factor.clone(),
+                        place: comptime!(self.place.clone()),
+                    }
                 }
                 TileKind::Memory(_)
                 | TileKind::PlaneTile(_)
@@ -270,20 +271,22 @@ impl<Acc: Numeric> Tile<Acc> {
     ///
     /// Only a manual-mma accumulator is cast in place; any other is cast as it drains.
     pub fn cast<E: Numeric>(&self) -> Tile<E> {
-        let place = comptime!(self.place.clone());
-        match &self.kind {
+        let kind = match &self.kind {
             TileKind::PlanePartition(partition) => {
-                Tile::new(TileKind::new_PlanePartition(partition.cast::<E>()), place)
+                TileKind::new_PlanePartition(partition.cast::<E>())
             }
-            TileKind::PlaneTile(tile) => {
-                Tile::new(TileKind::new_PlaneTile(tile.cast::<E>()), place)
-            }
+            TileKind::PlaneTile(tile) => TileKind::new_PlaneTile(tile.cast::<E>()),
             TileKind::Memory(_)
             | TileKind::TmaGmem(_)
             | TileKind::Procedural(_)
             | TileKind::Lines(_) => {
                 panic!("Tile::cast: only a plane-resident accumulator is cast in its registers")
             }
+        };
+        Tile::<E> {
+            kind,
+            factor: self.factor.clone(),
+            place: comptime!(self.place.clone()),
         }
     }
 

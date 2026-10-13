@@ -642,7 +642,6 @@ impl<T: Numeric> Memory<T> {
             comptime!(UnitShare::new(&step.level, &space).under(self.unit_share)),
             // Per level: the level's space still has the axis the projection dropped.
             comptime!(SplitShare::new(&step.level, &step.space, &space).under(self.split_share)),
-            self.factor.at(step),
         )
     }
 
@@ -750,7 +749,6 @@ impl<T: Numeric> Memory<T> {
         #[comptime] access: Access,
         #[comptime] unit_share: UnitShare,
         #[comptime] split_share: SplitShare,
-        factor: Factor,
     ) -> Memory<T> {
         Memory::<T> {
             address: comptime!(self.address),
@@ -767,7 +765,6 @@ impl<T: Numeric> Memory<T> {
             split_share,
             init_from: comptime!(self.init_from),
             contraction: comptime!(self.contraction),
-            factor,
             codebook: self.codebook.clone(),
         }
     }
@@ -792,7 +789,6 @@ impl<T: Numeric> Memory<T> {
             }),
             comptime!(self.unit_share),
             comptime!(self.split_share),
-            self.factor.clone(),
         )
     }
 
@@ -855,7 +851,6 @@ impl<T: Numeric> Memory<T> {
             }),
             comptime!(self.unit_share),
             comptime!(self.split_share),
-            self.factor.clone(),
         )
     }
 }

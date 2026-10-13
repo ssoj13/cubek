@@ -301,7 +301,6 @@ impl<T: Numeric> Memory<T> {
             split_share,
             init_from: comptime!(InitFrom::Cell),
             contraction: comptime!(None),
-            factor: Factor::none(),
             codebook: Codebook::none(),
         }
     }

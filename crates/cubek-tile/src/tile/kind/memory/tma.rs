@@ -11,8 +11,8 @@ use crate::*;
 /// A TMA tensor-map source: the launch-built view, the current box origin and the logical bound.
 ///
 /// A packed source is moved as the words it is stored in, so the stage it lands in holds them
-/// ([`packing`](Self::packing)); the scales it rides under are ones a stage keeps beside the words
-/// ([`factor`](Self::factor)), since the engine lands bytes as they lie and decodes nothing.
+/// ([`packing`](Self::packing)); the scales it rides under are ones a stage keeps beside the words,
+/// since the engine lands bytes as they lie and decodes nothing.
 #[derive(CubeType, Clone)]
 #[expand(derive(Clone))]
 pub(crate) struct TmaData<T: Numeric> {
@@ -25,8 +25,6 @@ pub(crate) struct TmaData<T: Numeric> {
     /// How the values sit in the cells the descriptor moves.
     #[cube(comptime)]
     pub(crate) packing: Packing,
-    /// The scales these values carry ([`Tile::mul`](crate::Tile::mul)), windowed with the box.
-    pub(crate) factor: Factor,
 }
 
 #[cube]
@@ -50,7 +48,6 @@ impl<T: Numeric> TmaData<T> {
             bound,
             units,
             packing,
-            factor: Factor::none(),
         }
     }
 
@@ -136,7 +133,6 @@ impl<T: Numeric> TmaData<T> {
             bound: self.bound.clone(),
             units: self.units,
             packing: self.packing,
-            factor: self.factor.at(step),
         }
     }
 }
