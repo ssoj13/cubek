@@ -287,6 +287,24 @@ fn run_paged_read_blocks(
     block: usize,
     from: u32,
 ) -> HostData {
+    let columns = pages.first().map_or(PAGES_EACH, Vec::len);
+    run_paged_read_table(
+        lens,
+        &[pages.len(), columns],
+        pages.iter().flatten().copied().collect(),
+        block,
+        from,
+    )
+}
+
+/// [`run_paged_read_blocks`] through a table of `entries` laid out as `shape`, any rank.
+fn run_paged_read_table(
+    lens: &[u32; SEQUENCES],
+    shape: &[usize],
+    entries: Vec<u32>,
+    block: usize,
+    from: u32,
+) -> HostData {
     let client = cubecl::test_device().client();
     let f32_ty = f32::elem_type_native();
     let u32_ty = u32::elem_type_native();
@@ -312,10 +330,9 @@ fn run_paged_read_blocks(
             .dtype(f32_ty)
             .custom(pool_values())
             .generate_with_f32_host_data();
-    let columns = pages.first().map_or(PAGES_EACH, Vec::len);
-    let table_handle = TestInput::builder(client.clone(), Shape::new([pages.len(), columns]))
+    let table_handle = TestInput::builder(client.clone(), Shape::from(shape.to_vec()))
         .dtype(u32_ty)
-        .custom(pages.iter().flatten().map(|&p| p as f32).collect())
+        .custom(entries.iter().map(|&p| p as f32).collect())
         .generate_without_host_data();
     let lens_handle = TestInput::builder(client.clone(), Shape::new([SEQUENCES]))
         .dtype(u32_ty)
@@ -471,6 +488,20 @@ fn a_paged_read_past_the_table_reads_zero() {
                     "sequence {b} feature {f} through {pages:?}"
                 );
             }
+        }
+    }
+}
+
+/// A table is `[sequences, pages_per_sequence]`: one of any other rank, here the same entries
+/// flat, names no page for any sequence and reads zero throughout, never its missing dims.
+#[test]
+fn a_paged_read_through_a_table_not_of_rank_two_reads_zero() {
+    let lens = [6, 5, 4];
+    let entries: Vec<u32> = PAGES.iter().flatten().copied().collect();
+    let got = run_paged_read_table(&lens, &[entries.len()], entries, READ_BLOCK, 0);
+    for b in 0..SEQUENCES {
+        for f in 0..FEATURES_READ {
+            assert_eq!(got.get_f32(&[b, f]), 0.0, "sequence {b} feature {f}");
         }
     }
 }

@@ -159,12 +159,25 @@ impl PageTable {
             true => width,
             false => 1,
         });
+        // Only `[sequences, pages_per_sequence]` names a page per sequence and column; any other
+        // rank reads as a table of no rows, so every line is masked rather than a dim past the
+        // table's rank read for its extent.
+        let mut sequence_stride = 0u32;
+        let mut page_stride = 0u32;
+        let mut sequences = 0u32;
+        let mut pages_per_sequence = 0u32;
+        if table.rank() == 2 {
+            sequence_stride = table.stride(0) as u32;
+            page_stride = table.stride(1) as u32;
+            sequences = table.shape(0) as u32;
+            pages_per_sequence = table.shape(1) as u32;
+        }
         let unpinned = PageTable {
             entries: unsafe { table.as_slice().as_boxed_unchecked() },
-            sequence_stride: table.stride(0) as u32,
-            page_stride: table.stride(1) as u32,
-            sequences: table.shape(0) as u32,
-            pages_per_sequence: table.shape(1) as u32,
+            sequence_stride,
+            page_stride,
+            sequences,
+            pages_per_sequence,
             // A bound pool holds a page at least; one stated by hand is kept off underflow.
             last_page: pool_pages.max_with(1u32).minus(1u32),
             pin_sequence: 0u32,

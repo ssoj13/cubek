@@ -294,15 +294,16 @@ impl<T: Numeric> Memory<T> {
 
     /// Line offset of the window origin; the window must be one contiguous region.
     fn window_offset(&self) -> usize {
-        comptime!(assert!(
-            !self.access.overhang.masks(),
-            "Memory::window_offset: cmma cannot mask an overhang"
-        ));
         // A base and a row stride step past a page into whichever page lies next in the pool.
+        // Ahead of the overhang's: a pool's table-set extents always mask.
         comptime!(assert!(
             self.layout.paging.is_none(),
             "Memory::window_offset: a pool of pages is read through its table one line at a \
              time, never as one raw run; stage it"
+        ));
+        comptime!(assert!(
+            !self.access.overhang.masks(),
+            "Memory::window_offset: cmma cannot mask an overhang"
         ));
         // A base and row stride above a storage tile would silently read another tile's cells.
         match comptime!(self.access.storage) {
@@ -632,19 +633,33 @@ impl<T: Numeric> Memory<T> {
         let start = self
             .window_start
             .plus(advances.sum(comptime!((0..rank).collect::<Vec<_>>())));
-        let load = self.vector_tile(&space);
-        // The window's extent along each dim in loads where the level fixes it.
-        let edges = comptime!(
-            (0..rank)
-                .map(|p| {
-                    let axis = space.axis_at(p);
-                    match step.level.extent_in(&space, axis) {
-                        Extent::Dynamic => None,
-                        edge => Some(load.loads_in(axis, edge.get(), space.extent_raw(axis))),
-                    }
-                })
-                .collect::<Vec<_>>()
-        );
+        // The window's extent along each dim in loads where the level fixes it, which only a pool
+        // of pages reads; it is direct, so these are the edges `direct_descent` cut.
+        let edges = comptime!(match self.layout.paging.is_some() {
+            true => {
+                let width = self.store.vector_size;
+                let load = VectorTile::new(
+                    &self.store.stored_tiles,
+                    space.axis_at(space.rank() - 1),
+                    width,
+                )
+                .unwrap_or_else(|why| panic!("Memory: {width} values a load: {why}"));
+                Some(
+                    (0..rank)
+                        .map(|p| {
+                            let axis = space.axis_at(p);
+                            match step.level.extent_in(&space, axis) {
+                                Extent::Dynamic => None,
+                                edge => {
+                                    Some(load.loads_in(axis, edge.get(), space.extent_raw(axis)))
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            false => None,
+        });
 
         self.moved_to(
             Window::new(
@@ -654,7 +669,7 @@ impl<T: Numeric> Memory<T> {
                 comptime!(self.window.signed),
                 comptime!(self.window.boundaries.clone()),
             ),
-            comptime!(Some(edges)),
+            comptime!(edges),
             start,
             map,
             // No longer covers the buffer, so no straight-through fill.

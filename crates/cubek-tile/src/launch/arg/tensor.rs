@@ -27,7 +27,9 @@ impl<'a, E: Numeric, V: Size> TileArg<'a, E, V> {
 
     /// [`tile`](TileArg::tile), read through `pages` where the operand is a pool of pages bound
     /// [`paged`](crate::launch::Arg::paged), and where it lies where `pages` is `None`: one
-    /// kernel serves either, the binding deciding which it compiles.
+    /// kernel serves either. The launch decides which it compiles by the `pages` it passes, which
+    /// must match the binding: a table for a pool bound `paged`, `None` for any other operand;
+    /// a mismatch panics as the kernel expands.
     pub fn tile_paged(
         &self,
         partitioning: &Partitioning,
