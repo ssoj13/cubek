@@ -1085,8 +1085,9 @@ impl<E: Numeric> Tile<E> {
         unexpanded!()
     }
 
-    /// Whether these values carry scales ([`mul`](Tile::mul)).
-    pub(crate) fn scaled(&self) -> comptime_type!(bool) {
+    /// Whether these values carry scales ([`mul`](Tile::mul)) or index a table
+    /// ([`lookup`](Tile::lookup)).
+    pub(crate) fn quantized(&self) -> comptime_type!(bool) {
         unexpanded!()
     }
 
@@ -1243,7 +1244,7 @@ impl<E: Numeric> TileExpand<E> {
         }
     }
 
-    pub(crate) fn __expand_scaled_method(&self, _scope: &Scope) -> bool {
+    pub(crate) fn __expand_quantized_method(&self, _scope: &Scope) -> bool {
         self.looks_up() || self.factor.scaled()
     }
 
@@ -1256,7 +1257,7 @@ impl<E: Numeric> TileExpand<E> {
     }
 
     pub(crate) fn __expand_decodes_method(&self, scope: &Scope) -> bool {
-        self.__expand_scaled_method(scope) && !self.__expand_scales_beside_method(scope)
+        self.__expand_quantized_method(scope) && !self.__expand_scales_beside_method(scope)
     }
 
     pub(crate) fn __expand_scales_beside_method(&self, _scope: &Scope) -> bool {

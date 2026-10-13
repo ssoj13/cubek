@@ -114,7 +114,7 @@ impl<E: Numeric> Tile<E> {
     /// or packed factor, or a global one whose layout the load cannot check, goes through its
     /// landing.
     pub(crate) fn load(&self, frag: &mut Matrix<E>, #[comptime] read: FragmentRead) {
-        let scaled = self.scaled();
+        let scaled = self.quantized();
         let packing = self.packing();
         let shared = self.is_shared();
         if comptime!(scaled || packing != Packing::Plain || !shared) {
@@ -144,7 +144,7 @@ impl<E: Numeric> Tile<E> {
         #[comptime] out: Space,
         #[comptime] instruction: Instruction,
     ) -> Tile<E> {
-        let scaled = self.scaled();
+        let scaled = self.quantized();
         let packing = self.packing();
         if comptime!(instruction == Instruction::Cmma && (scaled || packing != Packing::Plain)) {
             self.landed(side, out)

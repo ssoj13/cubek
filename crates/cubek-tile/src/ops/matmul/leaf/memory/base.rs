@@ -18,8 +18,8 @@ pub(crate) fn contract<E: Numeric, EL: Numeric, ER: Numeric>(
     #[comptime] config: RegisterBlock,
     #[comptime] semiring: Semiring,
 ) {
-    let lhs_scaled = lhs.scaled();
-    let rhs_scaled = rhs.scaled();
+    let lhs_scaled = lhs.quantized();
+    let rhs_scaled = rhs.quantized();
     let scaled = comptime!(lhs_scaled || rhs_scaled);
 
     let lhs_gathered = lhs.gathered();

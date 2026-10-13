@@ -776,7 +776,7 @@ impl<T: Numeric> PlanePartition<T> {
              into shared memory first"
         ));
         let (grid, m, n) = acc.fragment_grid();
-        let scaled = src.scaled();
+        let scaled = src.quantized();
         let packing = src.packing();
         let shared = src.is_shared();
         // The operand's own depth: the extent of the axes the accumulator lacks.
