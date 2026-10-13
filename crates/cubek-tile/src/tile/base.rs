@@ -1201,13 +1201,6 @@ impl<E: Numeric> TileExpand<E> {
         );
         let mut out = self.clone();
         out.factor = out.factor.and(FactorExpand::of(scope, scale));
-        if let TileKindExpand::TmaGmem(_) = &out.kind {
-            assert!(
-                out.factor.staged_beside(),
-                "Tile::mul: a tma source lands its values as they lie, so it rides only scales \
-                 a stage keeps beside them: words of block scales"
-            );
-        }
         out
     }
 
@@ -1446,15 +1439,27 @@ impl<S: Numeric> Tile<S> {
         }
     }
 
-    /// The one scale covering the value at `coords` of a tile spanning `values`.
+    /// The one scale covering the value at `coords` of a tile spanning `values`. An axis of the
+    /// scales the values do not span is one the scales do not vary along: a sum's scale names the
+    /// operand's axes, and is read at the origin of the ones the sum has summed away.
     #[allow(dead_code)] // Reached through its expand, from [`FactorRead`].
     pub(crate) fn scale_for(&self, coords: &Coords<u32>, #[comptime] values: Space) -> S {
         let rank = comptime!(self.place.space.rank());
+        let projection = self.projection();
         let mut own = Coords::<u32>::new();
         #[unroll]
         for p in 0..rank {
             let axis = comptime!(self.place.space.axis_at(p));
-            own.push(coords.at(comptime!(values.position(axis))));
+            if comptime!(values.contains(axis)) {
+                own.push(coords.at(comptime!(values.position(axis))));
+            } else {
+                comptime!(assert!(
+                    !projection.addresses(axis),
+                    "Tile::scale_for: these scales vary along {axis:?}, which the values they \
+                     scale do not span"
+                ));
+                own.push(0u32);
+            }
         }
         self.scale_at(&own)
     }

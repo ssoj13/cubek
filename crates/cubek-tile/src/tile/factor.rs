@@ -324,7 +324,8 @@ impl FactorExpand {
         assert!(
             !words || self.levels.len() == 1,
             "Factor: values under words of block scales carry no other level, since the \
-             block-scaled instruction that reads them holds one; apply a coarser factor to the sum"
+             block-scaled instruction that reads them holds one; take a coarser one out for the \
+             sum (`Tile::factor`)"
         );
         words
     }
