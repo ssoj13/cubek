@@ -704,21 +704,38 @@ impl<T: Numeric> Memory<T> {
                     space.extent_raw(axis)
                 ));
                 let index = step.coord(axis);
+                let from = self.window.origin.at(p);
+                let moved = index.times(edge).cast::<u32>();
 
-                origin.push(
-                    self.window
-                        .origin
-                        .at(p)
-                        .plus(index.times(edge).cast::<u32>().cast::<i32>()),
-                );
+                origin.push(from.plus(moved.cast::<i32>()));
                 extent.push(comptime!(edge as u32).runtime());
-                advances.push(index.cast::<u32>().times(step_offset(
-                    comptime!(self.layout.projection.clone()),
-                    comptime!(Axis(p as u8)),
-                    edge,
-                    &self.layout.physical_shape,
-                    &self.layout.physical_strides,
-                )));
+                let projection = comptime!(self.layout.projection.clone());
+                let coordinate = comptime!(Axis(p as u8));
+                let shape = &self.layout.physical_shape;
+                let strides = &self.layout.physical_strides;
+                // Over a storage-tiled axis the offset is not linear in the coordinate: a step
+                // into the next stored tile lands at that tile's stride, so the advance is the
+                // difference of the two offsets.
+                let advance = if comptime!(projection.carriers(coordinate).len() > 1) {
+                    let from = from.cast::<u32>();
+                    axis_offset(
+                        comptime!(projection.clone()),
+                        coordinate,
+                        from.plus(moved),
+                        shape,
+                        strides,
+                    )
+                    .minus(axis_offset(projection, coordinate, from, shape, strides))
+                } else {
+                    index.cast::<u32>().times(axis_offset(
+                        projection,
+                        coordinate,
+                        comptime!(edge as u32).runtime(),
+                        shape,
+                        strides,
+                    ))
+                };
+                advances.push(advance);
             }
         }
         (origin, extent, advances, RuntimeMap::integral(rank))
@@ -833,10 +850,10 @@ impl<T: Numeric> Memory<T> {
             }
         }
 
-        let start = self.window_start.plus(from.cast::<u32>().times(step_offset(
+        let start = self.window_start.plus(from.cast::<u32>().times(axis_offset(
             comptime!(self.layout.projection.clone()),
             comptime!(Axis(at as u8)),
-            1usize,
+            1u32.runtime(),
             &self.layout.physical_shape,
             &self.layout.physical_strides,
         )));

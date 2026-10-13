@@ -92,22 +92,26 @@ impl Scratch {
     }
 }
 
-/// The planes `levels` distribute `space` across; panics on a runtime-only count.
+/// The planes `levels` distribute `space` across, a plane group's every plane among them: one
+/// window each, as `PLANE_POS` indexes them. Panics on a runtime-only count.
 pub(crate) fn plane_windows(space: &Space, levels: &[Level]) -> usize {
     let mut handed = space.clone();
     let mut planes = 1;
     for level in levels {
-        for axis in level.axes() {
-            if level.coverage() == Coverage::Distribute(ComputeScope::Plane)
-                && level.distributes(axis)
-            {
-                planes *= level.instances_along(&handed, axis).unwrap_or_else(|| {
-                    panic!(
-                        "Tile::with_scratch: {axis:?} is distributed across the cube's planes at a \
-                         count only the launch knows, so the plane's windows cannot be sized"
-                    )
-                });
+        if let Some(per_instance) = level.coverage().scope().and_then(ComputeScope::planes) {
+            let mut instances = 1;
+            for axis in level.axes() {
+                if level.distributes(axis) {
+                    instances *= level.instances_along(&handed, axis).unwrap_or_else(|| {
+                        panic!(
+                            "Tile::with_scratch: {axis:?} is distributed across the cube's planes \
+                             at a count only the launch knows, so the plane's windows cannot be \
+                             sized"
+                        )
+                    });
+                }
             }
+            planes *= instances * per_instance;
         }
         handed = level.child(&handed);
     }
@@ -161,7 +165,11 @@ impl<Acc: Numeric> Accumulate<Acc> for Tile<Acc> {
             Instruction::Registers { config } => {
                 register_accumulator::<Acc, EA, EL, ER>(self, lhs, rhs, config, semiring)
             }
-            Instruction::Cmma | Instruction::Mma { .. } => {
+            Instruction::Cmma | Instruction::Mma { .. } | Instruction::Wgmma => {
+                if comptime!(instruction == Instruction::Wgmma) {
+                    comptime!(assert_warpgroups_hold(&self.place));
+                    comptime!(assert_groups_own_their_box(&self.place));
+                }
                 let vector_size = self.vector_size();
                 accumulator_in::<Acc, EA, EL>(
                     self,
@@ -300,7 +308,9 @@ impl<Acc: Numeric> Tile<Acc> {
                     let (_, m, n) = self.fragment_grid();
                     casts_in_place::<Acc, Out>(m, n)
                 }
-                PlaneTile::Mma(_) | PlaneTile::Registers(_) => comptime!(true),
+                PlaneTile::Mma(_) | PlaneTile::Registers(_) | PlaneTile::Wgmma(_) => {
+                    comptime!(true)
+                }
             },
             TileKind::Memory(_)
             | TileKind::TmaGmem(_)
@@ -347,15 +357,17 @@ impl<Acc: Numeric> Tile<Acc> {
     }
 
     /// [`drained_chunk_into`](Tile::drained_chunk_into) through the scratch this grid was opened
-    /// with.
+    /// with, where `dest` is one its fragments must bounce to reach.
     fn drain_chunk_as_opened<Out: Numeric>(
         &self,
         dest: &Tile<Out>,
         turn: usize,
         #[comptime] chunks: usize,
     ) {
+        let in_place = self.casts_in_place_to::<Out>();
+        let bounces = dest.fragments_bounce(in_place);
         match &self.kind {
-            TileKind::PlanePartition(p) => match comptime!(DrainPlan::new(p.held)) {
+            TileKind::PlanePartition(p) => match comptime!(DrainPlan::new(p.held, bounces)) {
                 DrainPlan::Straight => drain_chunk_below::<Acc, Out>(
                     self,
                     dest,
@@ -408,7 +420,9 @@ impl<Acc: Numeric> Tile<Acc> {
             TileKind::PlaneTile(t) => {
                 let cmma = match t {
                     PlaneTile::Cmma(_) => comptime!(true),
-                    PlaneTile::Mma(_) | PlaneTile::Registers(_) => comptime!(false),
+                    PlaneTile::Mma(_) | PlaneTile::Registers(_) | PlaneTile::Wgmma(_) => {
+                        comptime!(false)
+                    }
                 };
                 let in_place = self.casts_in_place_to::<Out>();
                 let bounces = dest.fragments_bounce(in_place);
@@ -434,10 +448,13 @@ impl<Acc: Numeric> Tile<Acc> {
         }
     }
 
-    /// [`drained_into`](Accumulate::drained_into) through the scratch this grid was opened with.
+    /// [`drained_into`](Accumulate::drained_into) through the scratch this grid was opened with,
+    /// where `dest` is one its fragments must bounce to reach.
     fn drain_as_opened<Out: Numeric>(&self, dest: &Tile<Out>) {
+        let in_place = self.casts_in_place_to::<Out>();
+        let bounces = dest.fragments_bounce(in_place);
         match &self.kind {
-            TileKind::PlanePartition(p) => match comptime!(DrainPlan::new(p.held)) {
+            TileKind::PlanePartition(p) => match comptime!(DrainPlan::new(p.held, bounces)) {
                 DrainPlan::Straight => drain_below::<Acc, Out>(
                     self,
                     dest,
@@ -484,6 +501,43 @@ impl<Acc: Numeric> Tile<Acc> {
             | TileKind::Lines(_) => {
                 panic!("Tile::drained_into: a plane-resident accumulator drains; nothing else does")
             }
+        }
+    }
+}
+
+/// Panics unless a warpgroup holds each of the output's tiles: the narrowest scope a level below
+/// `place` deals them to, or the one holding `place` where none does. A warpgroup MMA takes all
+/// four of its planes, so a plane, a unit or another group size would issue it short.
+fn assert_warpgroups_hold(place: &Placement) {
+    let holder = place
+        .below()
+        .iter()
+        .filter_map(|level| level.coverage().scope())
+        .min()
+        .unwrap_or_else(|| place.holder());
+    assert!(
+        holder == ComputeScope::WARPGROUP,
+        "Tile::accumulator: a warpgroup MMA's tile is held by {:?}, its four planes together, \
+         and this one's by {holder:?}; deal the tiles to `plane_groups(4, ..)`",
+        ComputeScope::WARPGROUP
+    );
+}
+
+/// Panics where a plane group level splits an axis the output at `place` lacks: each group would
+/// hold a partial of the same cells, and nothing merges plane groups' partials yet.
+fn assert_groups_own_their_box(place: &Placement) {
+    for level in &place.levels {
+        let Coverage::Distribute(ComputeScope::PlaneGroup { .. }) = level.coverage() else {
+            continue;
+        };
+        for axis in level.axes() {
+            let split = !matches!(level.count(axis), Some(Count::Stated(1)));
+            assert!(
+                !(level.distributes(axis) && split && !place.space.contains(axis)),
+                "Tile::accumulator: plane groups split {axis:?}, which the output lacks, so each \
+                 would hold a partial of the same cells, and nothing merges plane groups' \
+                 partials yet; deal each group a box of its own"
+            );
         }
     }
 }

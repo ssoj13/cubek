@@ -90,7 +90,7 @@ fn column_gemv_in_memory<E: Numeric, VX: Size, VW: Size, VS: Size>(
 
 /// Where the value at `coords` (along `axes`) sits in a buffer of `geometry`, its dims named
 /// `labels`, outermost first: each coordinate spread over the dims its axis names, finest last.
-pub(super) fn offset(
+pub(crate) fn offset(
     geometry: &Geometry,
     labels: &[Axis],
     axes: &[Axis],

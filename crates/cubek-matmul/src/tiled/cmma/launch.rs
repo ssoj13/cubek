@@ -8,7 +8,7 @@ use cubek_std::{
 };
 use cubek_tile::{
     Axis, Geometry, Launcher, Space,
-    launch::{Delivery, Grid, InputArgs, TmaBox, TmaTileArgLaunch},
+    launch::{Delivery, Grid, InputArgs, TmaBox, TmaLanding, TmaTileArgLaunch, TmaTiles},
 };
 
 use crate::{
@@ -362,12 +362,16 @@ fn launch_tma(
         (rows, cols): (u32, u32),
     ) -> InputArgs<'static, E, V> {
         if binding.tiling.is_tiled() {
-            let map = tma_operand_tiled(binding, box_dims, dtype, TensorMapSwizzle::None);
+            let landing = TmaLanding::Tiles;
+            let map = tma_operand_tiled(binding, box_dims, landing, dtype, TensorMapSwizzle::None);
             return InputArgs::TensorMap(TmaTileArgLaunch::tensor_map_stored(
                 map,
                 axes,
-                (rows, cols),
-                (box_dims.0 as u32, box_dims.1 as u32),
+                TmaTiles {
+                    dims: (rows, cols),
+                    tile: (box_dims.0 as u32, box_dims.1 as u32),
+                    landing,
+                },
             ));
         }
         let (map, transposed) = tma_operand(

@@ -87,10 +87,18 @@ impl<T: Numeric> Tile<T> {
                     comptime!(partition.m_tiles * rows)
                 }
                 PlaneTile::Cmma(_) | PlaneTile::Registers(_) => comptime!(every),
+                PlaneTile::Wgmma(_) => panic!(
+                    "Tile::slices_per_unit: a warpgroup accumulator's slices are not read in \
+                     place; drain it first"
+                ),
             },
             TileKind::PlaneTile(tile) => match tile {
                 PlaneTile::Mma(fragment) => fragment.rows_per_unit(),
                 PlaneTile::Cmma(_) | PlaneTile::Registers(_) => comptime!(every),
+                PlaneTile::Wgmma(_) => panic!(
+                    "Tile::slices_per_unit: a warpgroup accumulator's slices are not read in \
+                     place; drain it first"
+                ),
             },
             TileKind::Memory(_)
             | TileKind::TmaGmem(_)

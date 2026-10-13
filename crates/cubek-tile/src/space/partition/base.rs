@@ -161,11 +161,31 @@ impl Partitioning {
         false
     }
 
-    /// Every axis some tile reaches past the end of, whose accesses are masked.
+    /// Every axis some tile reaches past the end of, whose accesses are masked, in the space's
+    /// order.
+    ///
+    /// One walk down the levels, every axis asked at each: [`overhangs`](Self::overhangs) asked
+    /// axis by axis would cut the space down through every level once per axis, and a launch asks
+    /// this of every operand it binds, on every call.
     pub(crate) fn overhanging(&self) -> Vec<Axis> {
-        self.space
-            .axes()
-            .filter(|&axis| self.overhangs(axis))
+        let axes: Vec<Axis> = self.space.axes().collect();
+        for &axis in &axes {
+            assert!(
+                !self.space.is_dynamic(axis),
+                "Partitioning::overhanging: axis {axis:?} is Dynamic; ask the concrete space"
+            );
+        }
+        let mut overhanging = vec![false; axes.len()];
+        let mut space = self.space.clone();
+        for level in &self.levels {
+            for (hangs, &axis) in overhanging.iter_mut().zip(&axes) {
+                *hangs |= level.overhangs(&space, axis);
+            }
+            space = level.child(&space);
+        }
+        axes.into_iter()
+            .zip(overhanging)
+            .filter_map(|(axis, hangs)| hangs.then_some(axis))
             .collect()
     }
 
@@ -206,6 +226,7 @@ impl Partitioning {
                 .map(|dim| self.cube_instances(dim))
                 .product(),
             Coverage::Distribute(ComputeScope::Plane)
+            | Coverage::Distribute(ComputeScope::PlaneGroup { .. })
             | Coverage::Distribute(ComputeScope::Unit) => {
                 self.count_instances(|level| level.coverage() == coverage, |_, _| true)
             }
@@ -264,9 +285,17 @@ impl Partitioning {
         )
     }
 
-    /// Planes one cube holds: the levels' plane cuts, plus any that only fill.
+    /// Planes one cube holds: the levels' plane cuts, each plane group's planes, plus any that
+    /// only fill.
     pub fn planes_per_cube(&self) -> u32 {
-        self.instances(Coverage::Distribute(ComputeScope::Plane)) + self.fillers()
+        // `Levels` deals plane groups by one level, beside no plane level.
+        let grouped = self.levels.iter().find_map(|level| {
+            let scope = level.coverage().scope()?;
+            let planes = scope.planes().filter(|_| scope != ComputeScope::Plane)?;
+            Some(self.instances(level.coverage()) * planes as u32)
+        });
+        grouped.unwrap_or_else(|| self.instances(Coverage::Distribute(ComputeScope::Plane)))
+            + self.fillers()
     }
 
     /// Planes the cube holds that fill a walk's stages and take no tile
@@ -362,6 +391,27 @@ mod tests {
                 .planes(&[(N, 2)])
                 .build(),
         );
+    }
+
+    /// The overhanging axes are the ones some level's tile fails to divide, asked axis by axis,
+    /// in the space's order: an edge at the cube level, one only a plane's box meets, and none.
+    #[test]
+    fn the_overhanging_axes_are_the_ones_some_level_overhangs() {
+        let partitioning = Partitioning::new(
+            Space::new(&[(M, 200), (N, 256), (K, 96)]),
+            Levels::leaf(&[(M, 64), (N, 48), (K, 32)])
+                .planes(&[(M, 2), (N, 2)])
+                .walk_every(&[K])
+                .cubes(&[M, N])
+                .build(),
+        );
+        let asked: Vec<Axis> = [M, N, K]
+            .into_iter()
+            .filter(|&axis| partitioning.overhangs(axis))
+            .collect();
+        assert_eq!(partitioning.overhanging(), asked);
+        assert_eq!(asked, vec![M, N]);
+        assert!(staged(0).overhanging().is_empty());
     }
 
     /// A scope's box is the space cut down through its level, whatever walks inside it.

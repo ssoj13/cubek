@@ -108,9 +108,8 @@ impl<T: Numeric> TmaData<T> {
         sync_cube();
         if UNIT_POS == 0 {
             self.view
-                .tensor_map_store(src.store.buffer().downcast(), self.pos.clone());
-            tma_group_commit();
-            tma_group_wait_read(0usize);
+                .tensor_map_store(src.store.buffer().downcast(), self.pos.clone())
+                .wait();
         }
         sync_cube();
     }

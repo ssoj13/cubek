@@ -49,19 +49,24 @@ impl Boundaries {
         table_bounded: &[Axis],
         width: usize,
     ) -> Result<Self, Refusal> {
-        let boundary = Self::mode(
+        let coord_rank = projection.coordinate_rank();
+        if coord_rank == 0 {
+            return Err(Refusal::NoCoordinate);
+        }
+        // Most operands check nothing, and the untiled map below is the costly part.
+        let Some(boundary) = Self::mode(
             policy,
             projection,
             addressed,
             concrete,
             overhangs,
             table_bounded,
-        );
+        ) else {
+            return Ok(Boundaries {
+                modes: SmallVec::new(),
+            });
+        };
         let coords = projection.untiled();
-        let coord_rank = projection.coordinate_rank();
-        if coord_rank == 0 {
-            return Err(Refusal::NoCoordinate);
-        }
 
         // Whether coordinate axis `pa` is in bounds by construction; only an identity map can be.
         let settled = |pa: usize| match coords.physical_axis(pa).identity_axis() {
@@ -80,16 +85,12 @@ impl Boundaries {
                 .is_some_and(|axis| table_bounded.contains(&axis))
         };
 
-        if boundary.is_some()
-            && width > 1
-            && !settled(coord_rank - 1)
-            && !whole_lines(coord_rank - 1)
-        {
+        if width > 1 && !settled(coord_rank - 1) && !whole_lines(coord_rank - 1) {
             return Err(Refusal::UncheckableVectorEdge);
         }
 
         let modes: SmallVec<[Option<Boundary>; Space::MAX_RANK]> = (0..coord_rank)
-            .map(|pa| boundary.filter(|_| !settled(pa)))
+            .map(|pa| (!settled(pa)).then_some(boundary))
             .collect();
         // "Nothing is checked" has one form: the empty list.
         Ok(match modes.iter().any(Option::is_some) {

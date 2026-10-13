@@ -90,22 +90,65 @@ impl<E: Numeric> TmaTileArgLaunch<E> {
         TmaDynLayoutLaunch::new(dims, batched, shape.transposed, per_cell)
     }
 
-    /// A storage-tiled operand's tensor map over two `axes`; `dims` is its logical `(rows, cols)`.
+    /// A storage-tiled operand's tensor map over two `axes`, landing as `tiles.landing` says.
     pub fn tensor_map_stored(
         tensor_map: TensorMapArg<Tiled>,
         axes: &[Axis],
-        dims: (u32, u32),
-        tile: (u32, u32),
+        tiles: TmaTiles,
     ) -> Self {
+        Self::new(
+            Self::stored_view(tensor_map, axes, tiles),
+            TileSpec::direct(axes),
+        )
+    }
+
+    /// [`tensor_map_stored`](Self::tensor_map_stored) over a packed operand: its words hold
+    /// `field`, `field.per_word()` values a word along `cols`. `tiles` counts values.
+    pub fn tensor_map_stored_packed(
+        tensor_map: TensorMapArg<Tiled>,
+        axes: &[Axis],
+        tiles: TmaTiles,
+        field: Field,
+    ) -> Self {
+        let view = Self::stored_view(tensor_map, axes, tiles);
+        Self::new(view, TileSpec::direct(axes).packed(field))
+    }
+
+    fn stored_view(
+        tensor_map: TensorMapArg<Tiled>,
+        axes: &[Axis],
+        tiles: TmaTiles,
+    ) -> ViewArg<CoordsDyn> {
         assert_eq!(
             axes.len(),
             2,
             "TmaTileArg: a storage-tiled descriptor is a matrix; batch it by launching per batch"
         );
-        let layout = TmaStoredLayoutLaunch::new(dims, tile);
-        let view = ViewArg::new_tensor_map_tiled::<TmaStoredLayout>(tensor_map, layout);
-        Self::new(view, TileSpec::direct(axes))
+        let layout = TmaStoredLayoutLaunch::new(tiles.dims, tiles.tile, tiles.landing);
+        ViewArg::new_tensor_map_tiled::<TmaStoredLayout>(tensor_map, layout)
     }
+}
+
+/// Where a box of a storage-tiled operand lands its values: the order the descriptor states the
+/// operand in (`cubek::std::launch::tma::tma_operand_tiled`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TmaLanding {
+    /// One storage tile a box, landing as the contiguous run it is stored as: the descriptor is
+    /// the operand as stored, `[.., R/tr, C/tc, tr, tc]`.
+    Tiles,
+    /// Whole tiles both ways, landing the box's rows one after another, each a run of its tiles'
+    /// rows, as a row-major operand's box would land them: the descriptor is the operand as
+    /// `[R/tr, tr, C/tc, tc]`, the tiles' rows nested inside the tiles' columns.
+    Rows,
+}
+
+/// What a storage-tiled descriptor moves: the operand's logical `(rows, cols)`, its storage tile
+/// `(rows, cols)`, and where a box lands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TmaTiles {
+    pub dims: (u32, u32),
+    pub tile: (u32, u32),
+    pub landing: TmaLanding,
 }
 
 /// In-kernel tensor-map layout splitting a logical `(row, col)` into storage-tile coordinates.
@@ -113,8 +156,11 @@ impl<E: Numeric> TmaTileArgLaunch<E> {
 pub(crate) struct TmaStoredLayout {
     /// Logical `(rows, cols)` of the operand.
     dims: (u32, u32),
-    /// The storage tile `(rows, cols)`, the descriptor's box.
+    /// The storage tile `(rows, cols)`.
     tile: (u32, u32),
+    /// The order the descriptor states the tiles in.
+    #[cube(comptime)]
+    landing: TmaLanding,
 }
 
 #[cube]
@@ -125,11 +171,21 @@ impl Layout for TmaStoredLayout {
     fn to_source_pos(&self, pos: Self::Coordinates) -> Self::SourceCoordinates {
         let (tile_rows, tile_cols) = self.tile;
         let mut src = CoordsDyn::new();
-        src.push(pos[0] / tile_rows);
-        src.push(pos[1] / tile_cols);
         // A box origin is tile-aligned, so the in-tile offset is zero.
-        src.push(0u32);
-        src.push(0u32);
+        match comptime!(self.landing) {
+            TmaLanding::Tiles => {
+                src.push(pos[0] / tile_rows);
+                src.push(pos[1] / tile_cols);
+                src.push(0u32);
+                src.push(0u32);
+            }
+            TmaLanding::Rows => {
+                src.push(pos[0] / tile_rows);
+                src.push(0u32);
+                src.push(pos[1] / tile_cols);
+                src.push(0u32);
+            }
+        }
         src
     }
 

@@ -228,7 +228,7 @@ impl<'a> Arg<'a, Labelled> {
             &projection,
             &addressed,
             launch.space(),
-            &overhangs,
+            overhangs,
             &table_bounded,
             width,
         )?;
