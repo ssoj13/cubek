@@ -460,7 +460,7 @@ fn cfft_four_step_radix1_kernel<F: Float>(
 ///
 /// Grid: `count * N1` cubes. `CUBE_POS = window * N1 + k1`.
 #[cube(launch)]
-fn cfft_four_step_radix2_kernel<F: Float>(
+pub(crate) fn cfft_four_step_radix2_kernel<F: Float>(
     scratch_re: &mut Tensor<F>,
     scratch_im: &mut Tensor<F>,
     num_cubes: u32,

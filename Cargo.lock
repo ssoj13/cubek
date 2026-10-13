@@ -1393,6 +1393,7 @@ dependencies = [
  "cubek-fft",
  "cubek-test-utils",
  "num-complex",
+ "thiserror",
 ]
 
 [[package]]
@@ -1422,6 +1423,7 @@ dependencies = [
  "cubek-test-utils",
  "cubek-tile",
  "half",
+ "num-complex",
  "serde",
 ]
 

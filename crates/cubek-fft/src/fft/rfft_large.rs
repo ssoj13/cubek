@@ -261,7 +261,7 @@ pub(crate) fn irfft_large_launch(
 
 /// `y[k] = x[2k] + i * x[2k+1]`, one thread per `k`.
 #[cube(launch)]
-fn rfft_pack_kernel<F: Float>(
+pub(crate) fn rfft_pack_kernel<F: Float>(
     signal: &Tensor<F>,
     packed_re: &mut Tensor<F>,
     packed_im: &mut Tensor<F>,
