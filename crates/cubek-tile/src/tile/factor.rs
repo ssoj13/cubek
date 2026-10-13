@@ -318,20 +318,20 @@ impl FactorExpand {
 
     /// Whether these scales are staged beside the values they scale rather than decoded into
     /// them: words of block scales, which only the block-scaled instruction reads, so values
-    /// under them are staged as they are stored. Only one level is: the instruction holds one.
+    /// under them are staged as they are stored.
     pub(crate) fn staged_beside(&self) -> bool {
-        let words = self.inner().is_some_and(|level| level.words);
+        self.inner().is_some_and(|level| level.words)
+    }
+
+    /// This factor's stage as `spec` shapes the values': each level's scales staged beside them.
+    /// Only one level is, words of block scales: the instruction that reads them holds one.
+    pub(crate) fn staged(&self, scope: &Scope, spec: &StageSpec) -> FactorExpand {
         assert!(
-            !words || self.levels.len() == 1,
+            self.levels.len() == 1,
             "Factor: values under words of block scales carry no other level, since the \
              block-scaled instruction that reads them holds one; take a coarser one out for the \
              sum (`Tile::factor`)"
         );
-        words
-    }
-
-    /// This factor's stage as `spec` shapes the values': each level's scales staged beside them.
-    pub(crate) fn staged(&self, scope: &Scope, spec: &StageSpec) -> FactorExpand {
         FactorExpand {
             levels: self
                 .levels
