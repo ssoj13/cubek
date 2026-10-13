@@ -127,7 +127,7 @@ pub fn quant_gemv_kernel<EC: Numeric, EX: Numeric, ES: Numeric, EO: Numeric, VX:
     let w = w
         .tile_as::<EC>(&space)
         .mul(&block_scale.tile_as::<ES>(&space))
-        .mul_bound(&scale_tile::<ES>(global_scale, &space));
+        .mul_bound(&scale_tile::<ES, _>(global_scale, &space));
     let x = x.tile(&space);
     let out = out.tile(&space);
     // Each unit zeroes the window it owns: the output folds every step into what it holds.

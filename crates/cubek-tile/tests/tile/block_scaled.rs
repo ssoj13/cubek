@@ -64,8 +64,8 @@ fn block_scaled_matmul<E: Numeric>(
         });
     });
     // The per-tensor factors above the block scales, which the instruction holds no level for.
-    acc.scale(&scale_tile::<E>(a_global, &space));
-    acc.scale(&scale_tile::<E>(b_global, &space));
+    acc.scale(&scale_tile::<E, _>(a_global, &space));
+    acc.scale(&scale_tile::<E, _>(b_global, &space));
     acc.drained_into(&c);
 }
 

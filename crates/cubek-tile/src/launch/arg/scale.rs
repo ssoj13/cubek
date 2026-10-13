@@ -6,8 +6,8 @@ use crate::*;
 
 /// A scale level a launch may or may not have bound, as the tile it serves.
 #[cube]
-pub fn scale_tile<S: Numeric>(
-    level: &ComptimeOption<TileArg<'static, u32, Const<1>>>,
+pub fn scale_tile<S: Numeric, V: Size>(
+    level: &ComptimeOption<TileArg<'static, u32, V>>,
     partitioning: &Partitioning,
 ) -> ComptimeOption<Tile<S>> {
     #[comptime]
