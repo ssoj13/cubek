@@ -147,14 +147,14 @@ impl<T: Numeric> Tile<T> {
 fn check_decoding_copy(src: &Space, dst: &Space, load: &VectorTile, vw: usize, varies: bool) {
     assert!(
         src.axes().all(|axis| !src.is_dynamic(axis)),
-        "Tile::dequantize_from: a decoding copy reads its window through the values' own axes, which \
-         needs their extents at expansion; this window spans a dynamic axis. Copy a region a level \
-         cuts to (a stage, a leaf) rather than the whole dynamic tile"
+        "Tile::dequantize_from: a decoding copy reads its window through the values' own axes, \
+         which needs their extents at expansion; this window spans a dynamic axis. Copy a region a \
+         level cuts to (a stage, a leaf) rather than the whole dynamic tile"
     );
     assert!(
         src.narrows_to(dst),
-        "Tile::dequantize_from: a decoding copy writes the box it reads, and {src:?} does not narrow to \
-         {dst:?} by dropping one-wide axes"
+        "Tile::dequantize_from: a decoding copy writes the box it reads, and {src:?} does not \
+         narrow to {dst:?} by dropping one-wide axes"
     );
     // A destination line is `vw` consecutive values along its innermost axis, so it sits inside
     // one load only where that is the load's finest axis and its extent there holds whole lines.
