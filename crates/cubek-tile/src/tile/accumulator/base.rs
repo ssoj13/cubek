@@ -250,24 +250,22 @@ impl<Acc: Numeric> Accumulate<Acc> for Tile<Acc> {
 
     fn drained_into<Out: Numeric>(&self, dest: &Tile<Out>) {
         // A sum written out is a sum with its scales applied: multiplied by them once, as it
-        // drains.
+        // drains. A grid of cmma fragments is scaled, and reaches a destination it cannot store
+        // to directly, through a scratch: where none was opened, the drain opens the smallest.
         let levels = self.factor_levels();
-        if comptime!(levels > 0) {
+        let scaled = comptime!(levels > 0);
+        let unopened = self.scratch_unopened();
+        let in_place = self.casts_in_place_to::<Out>();
+        let bounces = dest.fragments_bounce(in_place);
+        if comptime!(unopened && (scaled || bounces)) {
+            let opened = self.clone().with_scratch(Scratch::OneTile);
+            opened.drained_into(dest);
+        } else if comptime!(scaled) {
             let mut sum = self.unscaled();
             sum.scale_by(Acc::cast_from(self.factor.whole()));
             sum.drained_into(dest);
         } else {
-            // A destination the fragments cannot store to directly needs a scratch: where none
-            // was opened, the drain opens the smallest.
-            let unopened = self.scratch_unopened();
-            let in_place = self.casts_in_place_to::<Out>();
-            let bounces = dest.fragments_bounce(in_place);
-            if comptime!(unopened && bounces) {
-                let opened = self.clone().with_scratch(Scratch::OneTile);
-                opened.drained_into(dest);
-            } else {
-                self.drain_as_opened(dest);
-            }
+            self.drain_as_opened(dest);
         }
     }
 }

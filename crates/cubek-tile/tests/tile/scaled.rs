@@ -114,7 +114,8 @@ fn scaled_matmul_promoted<E: Numeric, S: Numeric>(
 }
 
 /// `c = (a ⊗ blocks ⊗ global) · b`, the global factored out of the sum: each term carries its
-/// block scale, and the scale over the whole operand multiplies the sum once, as it drains.
+/// block scale, and the scale over the whole operand multiplies the sum once, as it drains, in
+/// the form `instruction` sums in.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
 fn factored_matmul<E: Numeric, S: Numeric>(
@@ -125,6 +126,7 @@ fn factored_matmul<E: Numeric, S: Numeric>(
     c: &TileArg<'_, E, Const<1>>,
     space: Partitioning,
     #[comptime] level: Level,
+    #[comptime] instruction: Instruction,
     #[define(E, S)] _dtypes: [ElemType; 2],
 ) {
     let a = a
@@ -134,14 +136,7 @@ fn factored_matmul<E: Numeric, S: Numeric>(
     let b = b.tile(&space);
     let mut c = c.tile(&space);
     let (a, a_factor) = a.factor(c.space());
-    let acc = c.accumulator::<E, E, E>(
-        &a,
-        &b,
-        comptime!(Instruction::Registers {
-            config: REGISTER_BLOCK
-        }),
-        Semiring::SUM_PROD,
-    );
+    let acc = c.accumulator::<E, E, E>(&a, &b, instruction, Semiring::SUM_PROD);
     for region in space.over(&level) {
         let mut acc_r = acc.at(&region);
         acc_r.mma(&a.at(&region), &b.at(&region));
@@ -332,11 +327,33 @@ fn two_levels_fold_in_order() {
     }
 }
 
-/// [`factored_matmul`]: the global leaves the operand for the sum and is applied once as it
-/// drains, the block scales staying with every term; the result is the same product.
+/// [`factored_matmul`] in registers: the global leaves the operand for the sum and is applied
+/// once as it drains, the block scales staying with every term; the result is the same product.
 #[test]
 fn a_scale_over_the_whole_operand_applies_once_as_the_sum_drains() {
-    let (rows, cols, block, blocks) = (4, 4, 8, 2);
+    check_factored(
+        Instruction::Registers {
+            config: REGISTER_BLOCK,
+        },
+        4,
+    );
+}
+
+/// [`factored_matmul`] in cmma fragments, which are not read cell by cell: the drain scales them
+/// through a scratch it opens.
+#[test]
+fn a_scale_over_the_whole_operand_applies_once_to_cmma_fragments() {
+    let client = cubecl::test_device().client();
+    if !require_cmma_8x8x8_f32(&client) {
+        return;
+    }
+    check_factored(Instruction::Cmma, 8);
+}
+
+/// `c = (a ⊗ blocks ⊗ global) · b` over `size × size` summed in `instruction`'s form, the global
+/// factored out of the sum, against the host product.
+fn check_factored(instruction: Instruction, size: usize) {
+    let (rows, cols, block, blocks) = (size, size, 8, 2);
     let depth = block * blocks;
 
     let client = cubecl::test_device().client();
@@ -418,6 +435,7 @@ fn a_scale_over_the_whole_operand_applies_once_as_the_sum_drains() {
         ),
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
+        instruction,
         [dtype, dtype],
     );
 

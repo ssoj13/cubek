@@ -105,6 +105,24 @@ impl<T: Numeric> CmmaData<T> {
         )
     }
 
+    /// Every cell multiplied by `factor`, bounced through the fragment's slot of the plane's
+    /// scratch as [`mul_along`](Self::mul_along) bounces it: a cmma fragment is not read cell by
+    /// cell.
+    pub(crate) fn scale(&self, factor: T) {
+        self.spill_to_scratch();
+        sync_plane();
+        let mut scratch = self.scratch_slot();
+        let (m, n) = self.shape;
+        let mut cell = UNIT_POS_PLANE as usize;
+        while cell < m * n {
+            scratch[cell] *= factor;
+            cell += PLANE_DIM as usize;
+        }
+        sync_plane();
+        self.reload_from_scratch();
+        sync_plane();
+    }
+
     /// `self[i, :] *= factors[first + i]` for every slice `i` along the fragment's columns,
     /// bounced through its slot of the plane's scratch: spilled, scaled by the plane's units in
     /// turns, and reloaded, each step met on `sync_plane`. The slot is the plane's own, so no
