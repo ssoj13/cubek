@@ -769,8 +769,8 @@ impl<T: Numeric> Tile<T> {
     /// up: the one copy that applies a tile's scales.
     ///
     /// From memory, each load is decoded once, in the unit that reads it, its scales multiplied
-    /// together in `f32` and the value rounded once. From an accumulator, the sum is multiplied by
-    /// the scale it carries as it drains; the sum is spent by its write.
+    /// together in `f32` and the value rounded once. From an accumulator, it is the sum's drain,
+    /// which multiplies the sum by the scale it carries; the sum is spent by its write.
     pub fn dequantize_from<S: Numeric>(&mut self, src: &Tile<S>) {
         match &src.kind {
             TileKind::Memory(_) => {
@@ -783,13 +783,8 @@ impl<T: Numeric> Tile<T> {
                 self.copy_scaled_from(src);
             }
             TileKind::PlaneTile(_) | TileKind::PlanePartition(_) => {
-                let mut sum = src.clone();
-                let levels = src.factor_levels();
-                if comptime!(levels > 0) {
-                    sum.scale_by(S::cast_from(src.factor.whole()));
-                }
                 let dest = self.clone();
-                sum.drained_into(&dest);
+                src.drained_into(&dest);
             }
             TileKind::TmaGmem(_) | TileKind::Procedural(_) | TileKind::Lines(_) => panic!(
                 "Tile::dequantize_from: values are decoded from memory, and a sum from its \
@@ -1139,6 +1134,11 @@ impl<E: Numeric> Tile<E> {
         unexpanded!()
     }
 
+    /// This tile without the scales it carries.
+    pub(crate) fn unscaled(&self) -> Tile<E> {
+        unexpanded!()
+    }
+
     /// The innermost level of the scales these values carry, alone: what a block-scaled
     /// instruction reads a scale of per block.
     pub(crate) fn innermost_factor(&self) -> Factor {
@@ -1303,6 +1303,12 @@ impl<E: Numeric> TileExpand<E> {
 
     pub(crate) fn __expand_factor_levels_method(&self, _scope: &Scope) -> usize {
         self.factor.levels.len()
+    }
+
+    pub(crate) fn __expand_unscaled_method(&self, _scope: &Scope) -> TileExpand<E> {
+        let mut out = self.clone();
+        out.factor = FactorExpand::default();
+        out
     }
 
     pub(crate) fn __expand_innermost_factor_method(&self, _scope: &Scope) -> FactorExpand {
