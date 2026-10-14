@@ -12,6 +12,7 @@
 
 use cubecl::{CubeDim, calculate_cube_count_elemwise, client::Client, prelude::*};
 
+use super::io_dtype;
 use crate::backward::definition::BackwardConfig;
 use crate::forward::definition::{AttentionGlobalTypes, AttentionSetupError};
 
@@ -20,7 +21,7 @@ fn flash_attention_backward_dv_kernel<E: Float>(
     q: &Tensor<E>,
     k: &Tensor<E>,
     do_: &Tensor<E>,
-    lse: &Tensor<E>,
+    lse: &Tensor<f32>,
     dv: &mut Tensor<E>,
     scale: f32,
     #[comptime] head_dim: usize,
@@ -46,11 +47,10 @@ fn flash_attention_backward_dv_kernel<E: Float>(
     let do_row_base = bh * seq_q * val_dim;
     let row_idx_base = bh * seq_q;
 
-    let scale_e = E::cast_from(scale);
 
-    let mut dv_acc = Array::new(val_dim);
+    let mut dv_acc = Array::<f32>::new(val_dim);
     for dd in 0..val_dim {
-        dv_acc[dd] = E::new(0.0_f32);
+        dv_acc[dd] = 0.0_f32;
     }
 
     for i in 0..seq_q {
@@ -60,20 +60,20 @@ fn flash_attention_backward_dv_kernel<E: Float>(
             let do_base = do_row_base + i * val_dim;
             let lse_i = lse[row_idx_base + i];
 
-            let mut dot = E::new(0.0_f32);
+            let mut dot = 0.0_f32;
             for dd in 0..head_dim {
-                dot += q[q_base + dd] * k[k_base + dd];
+                dot += f32::cast_from(q[q_base + dd]) * f32::cast_from(k[k_base + dd]);
             }
-            let p_ij = (dot * scale_e - lse_i).exp();
+            let p_ij = (dot * scale - lse_i).exp();
 
             for dd in 0..val_dim {
-                dv_acc[dd] += p_ij * do_[do_base + dd];
+                dv_acc[dd] += p_ij * f32::cast_from(do_[do_base + dd]);
             }
         }
     }
 
     for dd in 0..val_dim {
-        dv[dv_base + dd] = dv_acc[dd];
+        dv[dv_base + dd] = E::cast_from(dv_acc[dd]);
     }
 }
 
@@ -83,8 +83,8 @@ fn flash_attention_backward_dk_kernel<E: Float>(
     k: &Tensor<E>,
     v: &Tensor<E>,
     do_: &Tensor<E>,
-    lse: &Tensor<E>,
-    d: &Tensor<E>,
+    lse: &Tensor<f32>,
+    d: &Tensor<f32>,
     dk: &mut Tensor<E>,
     scale: f32,
     #[comptime] head_dim: usize,
@@ -111,11 +111,10 @@ fn flash_attention_backward_dk_kernel<E: Float>(
     let do_row_base = bh * seq_q * val_dim;
     let row_idx_base = bh * seq_q;
 
-    let scale_e = E::cast_from(scale);
 
-    let mut dk_acc = Array::new(head_dim);
+    let mut dk_acc = Array::<f32>::new(head_dim);
     for dd in 0..head_dim {
-        dk_acc[dd] = E::new(0.0_f32);
+        dk_acc[dd] = 0.0_f32;
     }
 
     for i in 0..seq_q {
@@ -126,33 +125,33 @@ fn flash_attention_backward_dk_kernel<E: Float>(
             let lse_i = lse[row_idx_base + i];
             let d_i = d[row_idx_base + i];
 
-            let mut dot = E::new(0.0_f32);
+            let mut dot = 0.0_f32;
             for dd in 0..head_dim {
-                dot += q[q_base + dd] * k[k_base + dd];
+                dot += f32::cast_from(q[q_base + dd]) * f32::cast_from(k[k_base + dd]);
             }
-            let p_ij = (dot * scale_e - lse_i).exp();
+            let p_ij = (dot * scale - lse_i).exp();
 
-            let mut dp = E::new(0.0_f32);
+            let mut dp = 0.0_f32;
             for dd in 0..val_dim {
-                dp += do_[do_base + dd] * v[v_base + dd];
+                dp += f32::cast_from(do_[do_base + dd]) * f32::cast_from(v[v_base + dd]);
             }
 
-            let s_ds = scale_e * p_ij * (dp - d_i);
+            let s_ds = scale * p_ij * (dp - d_i);
             for dd in 0..head_dim {
-                dk_acc[dd] += s_ds * q[q_base + dd];
+                dk_acc[dd] += s_ds * f32::cast_from(q[q_base + dd]);
             }
         }
     }
 
     for dd in 0..head_dim {
-        dk[dk_base + dd] = dk_acc[dd];
+        dk[dk_base + dd] = E::cast_from(dk_acc[dd]);
     }
 }
 
 /// Compute `dK` and `dV` into pre-allocated tensors (overwrites, not
 /// accumulates).
 ///
-/// Inputs:
+/// Inputs (q/k/v/dO/dK/dV dtype taken from `global_dtypes`, accumulation in fp32):
 /// - `q, k, v`: `[B, H, N, d]`.
 /// - `do_`:     `[B, H, N, d]` upstream gradient.
 /// - `lse`:     `[B, H, N]` fp32: saved from forward.
@@ -172,10 +171,11 @@ pub fn flash_attention_backward_dkdv(
     d: TensorBinding,
     dk: TensorBinding,
     dv: TensorBinding,
-    _global_dtypes: &AttentionGlobalTypes,
+    global_dtypes: &AttentionGlobalTypes,
     config: BackwardConfig,
 ) -> Result<(), AttentionSetupError> {
-    let dtype = f32::elem_type_native();
+    let dtype = io_dtype(global_dtypes)?;
+    let f32_size = f32::elem_type_native().size();
 
     let head_dim = q.shape[q.shape.len() - 1];
     let val_dim = v.shape[v.shape.len() - 1];
@@ -189,8 +189,8 @@ pub fn flash_attention_backward_dkdv(
         .max(k.required_address_type(dtype.size()))
         .max(v.required_address_type(dtype.size()))
         .max(do_.required_address_type(dtype.size()))
-        .max(lse.required_address_type(dtype.size()))
-        .max(d.required_address_type(dtype.size()))
+        .max(lse.required_address_type(f32_size))
+        .max(d.required_address_type(f32_size))
         .max(dk.required_address_type(dtype.size()))
         .max(dv.required_address_type(dtype.size()));
 
