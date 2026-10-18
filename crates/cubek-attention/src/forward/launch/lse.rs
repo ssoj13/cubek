@@ -301,7 +301,8 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
     let k_bh_base = bh * seq_kv * head_dim;
     let row_bh_base = bh * seq_q;
 
-    let mut kv_sh = Shared::<[E]>::new_aligned_slice(k_sh_len, 16usize);
+    let mut k_sh = Shared::<[E]>::new_aligned_slice(k_sh_len, 16usize);
+    let mut v_sh = Shared::<[E]>::new_aligned_slice(k_sh_len, 16usize);
     let mut q_stage_sh = Shared::<[E]>::new_aligned_slice(warp_sh_len, 16usize);
     let mut s_sh = Shared::<[F]>::new_aligned_slice(warp_sh_len, 16usize);
 
@@ -317,7 +318,7 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
         let d_off = d_blk * 16;
         #[unroll]
         for step in 0..8usize {
-            let idx = lane + step * 32;
+            let idx = lane + step * 128 / 4;
             let rq = idx / 16;
             let cq = idx % 16;
             let q_idx = warp_q_base + rq;
@@ -377,9 +378,12 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
                 let kv_idx = kv_base + r_kv;
                 let d_idx = d_off + c_d;
                 if kv_idx < seq_kv && d_idx < head_dim {
-                    kv_sh[blk_off + elem] = k[k_bh_base + kv_idx * head_dim + d_idx];
+                    let g_off = k_bh_base + kv_idx * head_dim + d_idx;
+                    k_sh[blk_off + elem] = k[g_off];
+                    v_sh[blk_off + elem] = v[g_off];
                 } else {
-                    kv_sh[blk_off + elem] = E::cast_from(0.0_f32);
+                    k_sh[blk_off + elem] = E::cast_from(0.0_f32);
+                    v_sh[blk_off + elem] = E::cast_from(0.0_f32);
                 }
             }
         }
@@ -408,7 +412,7 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
                         16usize,
                         16usize,
                         cmma::MatrixLayout::ColMajor,
-                        &kv_sh[b_start..b_end],
+                        &k_sh[b_start..b_end],
                         16u32,
                     );
                     cmma::execute(&q_frags[d_blk], &k_col, &s_frag, &s_frag);
@@ -452,12 +456,14 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
                             q_stage_sh[r_off + c] = E::cast_from(p);
                         }
                     }
+                    if m_new > m {
+                        #[unroll]
+                        for idx in 0..o_reg_len {
+                            o_reg[idx] = o_reg[idx] * alpha;
+                        }
+                    }
                     m = m_new;
                     l = l_new;
-                    #[unroll]
-                    for idx in 0..o_reg_len {
-                        o_reg[idx] = o_reg[idx] * alpha;
-                    }
                 } else if lane < 16 {
                     #[unroll]
                     for c in 0..16usize {
@@ -465,36 +471,7 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
                     }
                 }
                 sync_plane();
-            }
-        }
 
-        sync_cube();
-
-        #[unroll]
-        for d_blk in 0..num_d_tiles {
-            let blk_off = d_blk * 256;
-            let d_off = d_blk * 16;
-            #[unroll]
-            for s in 0..2usize {
-                let elem = tid + s * 128;
-                let r_kv = elem / 16;
-                let c_d = elem % 16;
-                let kv_idx = kv_base + r_kv;
-                let d_idx = d_off + c_d;
-                if kv_idx < seq_kv && d_idx < head_dim {
-                    kv_sh[blk_off + elem] = v[k_bh_base + kv_idx * head_dim + d_idx];
-                } else {
-                    kv_sh[blk_off + elem] = E::cast_from(0.0_f32);
-                }
-            }
-        }
-
-        sync_cube();
-
-        if warp_q_base < seq_q {
-            let warp_q_max = warp_q_base + 15;
-            let warp_active = !causal || (kv_base + seq_q <= warp_q_max + seq_kv);
-            if warp_active {
                 let p_frag = cmma::Matrix::<E>::from_slice(
                     cmma::MatrixIdent::A,
                     16usize,
@@ -515,7 +492,7 @@ fn attention_fwd_lse_wmma_kernel<E: Float, F: Float>(
                         16usize,
                         16usize,
                         cmma::MatrixLayout::RowMajor,
-                        &kv_sh[b_start..b_end],
+                        &v_sh[b_start..b_end],
                         16u32,
                     );
                     let pv_frag = cmma::Matrix::<F>::from_value(
